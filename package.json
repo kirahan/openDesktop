@@ -1,0 +1,23 @@
+{
+  "name": "opendesktop",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @opendesktop/web && npm run build -w @opendesktop/core",
+    "test": "npm run test -w @opendesktop/core",
+    "lint": "npm run lint -w @opendesktop/core",
+    "od": "node packages/core/dist/cli.js",
+    "oc": "yarn workspace @opendesktop/core cli",
+    "dev:core": "yarn workspace @opendesktop/core run dev core start --port 8787",
+    "dev:web": "yarn workspace @opendesktop/web run dev:host",
+    "dev:core:ui": "yarn workspace @opendesktop/core run dev core start --port 8787 --web-dist ./packages/web/dist",
+    "app:demo": "yarn oc app init-demo",
+    "demo": "yarn oc app init-demo && yarn oc session create demo",
+    "cdp:list-windows": "yarn workspace @opendesktop/cdp-probe run list"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}
