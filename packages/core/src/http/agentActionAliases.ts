@@ -9,12 +9,26 @@ const LEGACY_TO_CANONICAL: Record<string, string> = {
   dom: "get",
 };
 
-/** 当前实现已支持的 canonical `action` 值 */
+/**
+ * 当前实现已支持的 canonical `action` 值（与 OpenCLI README 动词表对齐，另含 `console-messages`）。
+ */
 export const SUPPORTED_AGENT_ACTIONS = [
+  "open",
   "state",
+  "click",
+  "type",
+  "select",
+  "keys",
+  "wait",
   "get",
   "screenshot",
+  "scroll",
+  "back",
   "eval",
+  "network",
+  "init",
+  "verify",
+  "close",
   "console-messages",
 ] as const;
 

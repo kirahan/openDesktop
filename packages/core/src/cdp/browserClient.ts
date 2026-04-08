@@ -1,5 +1,8 @@
 import WebSocket from "ws";
 
+/** 与 OpenCLI CDP 发送超时的量级对齐；单条 CDP 命令默认上限。 */
+export const DEFAULT_CDP_TIMEOUT_MS = 30_000;
+
 async function getBrowserWsUrl(cdpPort: number): Promise<string | undefined> {
   const res = await fetch(`http://127.0.0.1:${cdpPort}/json/version`);
   if (!res.ok) return undefined;
@@ -7,17 +10,29 @@ async function getBrowserWsUrl(cdpPort: number): Promise<string | undefined> {
   return v.webSocketDebuggerUrl;
 }
 
+type Pending = {
+  resolve: (v: unknown) => void;
+  reject: (e: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+type ProtocolWaiter = {
+  method: string;
+  sessionId?: string;
+  resolve: (params: unknown) => void;
+  reject: (e: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
 /**
  * 最小 CDP 多路复用客户端：连接 browser WebSocket，发送带可选 sessionId 的命令。
  */
-class BrowserCdp {
+export class BrowserCdp {
   private nextId = 1;
-  private readonly pending = new Map<
-    number,
-    { resolve: (v: unknown) => void; reject: (e: Error) => void }
-  >();
+  private readonly pending = new Map<number, Pending>();
+  private readonly protocolWaiters: ProtocolWaiter[] = [];
   /** 非请求类协议事件（如 Runtime.consoleAPICalled） */
-  onProtocolEvent?: (method: string, params: unknown) => void;
+  onProtocolEvent?: (method: string, params: unknown, sessionId?: string) => void;
 
   constructor(private readonly ws: WebSocket) {
     ws.on("message", (data: WebSocket.RawData) => {
@@ -25,6 +40,7 @@ class BrowserCdp {
         id?: number;
         method?: string;
         params?: unknown;
+        sessionId?: string;
         result?: unknown;
         error?: { message: string };
       };
@@ -36,6 +52,7 @@ class BrowserCdp {
       if (msg.id !== undefined && this.pending.has(msg.id)) {
         const p = this.pending.get(msg.id)!;
         this.pending.delete(msg.id);
+        clearTimeout(p.timer);
         if (msg.error) {
           p.reject(new Error(msg.error.message ?? "cdp_error"));
         } else {
@@ -43,59 +60,158 @@ class BrowserCdp {
         }
         return;
       }
-      if (msg.method && this.onProtocolEvent) {
-        this.onProtocolEvent(msg.method, msg.params);
+      if (msg.method) {
+        const sid = msg.sessionId;
+        const idx = this.protocolWaiters.findIndex(
+          (w) => w.method === msg.method && (!w.sessionId || w.sessionId === sid),
+        );
+        if (idx >= 0) {
+          const w = this.protocolWaiters.splice(idx, 1)[0];
+          clearTimeout(w.timer);
+          w.resolve(msg.params);
+          return;
+        }
+        if (this.onProtocolEvent) {
+          this.onProtocolEvent(msg.method, msg.params ?? {}, sid);
+        }
       }
     });
+
+    const kill = (err: Error) => {
+      this.rejectAll(err);
+    };
     ws.on("error", (err) => {
-      for (const [, p] of this.pending) p.reject(err instanceof Error ? err : new Error(String(err)));
-      this.pending.clear();
+      kill(err instanceof Error ? err : new Error(String(err)));
     });
+    ws.on("close", () => {
+      kill(new Error("cdp_ws_closed"));
+    });
+  }
+
+  private rejectAll(err: Error): void {
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(err);
+    }
+    this.pending.clear();
+    for (const w of this.protocolWaiters) {
+      clearTimeout(w.timer);
+      w.reject(err);
+    }
+    this.protocolWaiters.length = 0;
   }
 
   close(): void {
     this.ws.close();
   }
 
-  send(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<unknown> {
+  /**
+   * @param timeoutMs 超时后 pending 移除并 reject（message: `cdp_timeout`）
+   */
+  send(
+    method: string,
+    params?: Record<string, unknown>,
+    sessionId?: string,
+    timeoutMs = DEFAULT_CDP_TIMEOUT_MS,
+  ): Promise<unknown> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (this.pending.has(id)) {
+          this.pending.delete(id);
+          reject(new Error("cdp_timeout"));
+        }
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (v: unknown) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e: Error) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+        timer,
+      });
       const payload: Record<string, unknown> = { id, method, params: params ?? {} };
       if (sessionId) payload.sessionId = sessionId;
       this.ws.send(JSON.stringify(payload));
     });
   }
+
+  /**
+   * 等待下一条匹配的 CDP 事件（无 `id` 的 protocol notification）。
+   */
+  waitForProtocolEvent(
+    method: string,
+    timeoutMs: number,
+    sessionId?: string,
+  ): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const waiter: ProtocolWaiter = {
+        method,
+        sessionId,
+        resolve: (params: unknown) => {
+          clearTimeout(waiter.timer);
+          const i = this.protocolWaiters.indexOf(waiter);
+          if (i >= 0) this.protocolWaiters.splice(i, 1);
+          resolve(params);
+        },
+        reject: (e: Error) => {
+          clearTimeout(waiter.timer);
+          const i = this.protocolWaiters.indexOf(waiter);
+          if (i >= 0) this.protocolWaiters.splice(i, 1);
+          reject(e);
+        },
+        timer: setTimeout(() => {
+          const i = this.protocolWaiters.indexOf(waiter);
+          if (i >= 0) this.protocolWaiters.splice(i, 1);
+          reject(new Error("cdp_event_timeout"));
+        }, timeoutMs),
+      };
+      this.protocolWaiters.push(waiter);
+    });
+  }
 }
 
-export async function captureTargetScreenshot(
-  cdpPort: number,
+/**
+ * 附着到调试 target 并返回 **扁平 sessionId**（flatten: true）。
+ */
+export async function attachToTargetSession(
+  cdp: BrowserCdp,
   targetId: string,
-): Promise<{ base64: string; mime: string } | { error: string }> {
+  timeoutMs = DEFAULT_CDP_TIMEOUT_MS,
+): Promise<string> {
+  const attach = (await cdp.send(
+    "Target.attachToTarget",
+    { targetId, flatten: true },
+    undefined,
+    timeoutMs,
+  )) as { sessionId?: string };
+  if (!attach.sessionId) throw new Error("attach_no_session");
+  return attach.sessionId;
+}
+
+async function withBrowserCdp<T>(
+  cdpPort: number,
+  fn: (cdp: BrowserCdp) => Promise<T>,
+): Promise<T | { error: string }> {
   const wsUrl = await getBrowserWsUrl(cdpPort);
   if (!wsUrl) return { error: "no_browser_ws" };
 
   const ws = new WebSocket(wsUrl);
-  await new Promise<void>((resolve, reject) => {
-    ws.once("open", () => resolve());
-    ws.once("error", reject);
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve());
+      ws.once("error", reject);
+    });
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
 
   const cdp = new BrowserCdp(ws);
   try {
-    const attach = (await cdp.send("Target.attachToTarget", {
-      targetId,
-      flatten: true,
-    })) as { sessionId?: string };
-    const sessionId = attach.sessionId;
-    if (!sessionId) return { error: "attach_no_session" };
-
-    await cdp.send("Page.enable", {}, sessionId);
-    const shot = (await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId)) as {
-      data?: string;
-    };
-    if (!shot.data) return { error: "no_screenshot_data" };
-    return { base64: shot.data, mime: "image/png" };
+    return await fn(cdp);
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   } finally {
@@ -103,29 +219,28 @@ export async function captureTargetScreenshot(
   }
 }
 
+export async function captureTargetScreenshot(
+  cdpPort: number,
+  targetId: string,
+): Promise<{ base64: string; mime: string } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Page.enable", {}, sessionId);
+    const shot = (await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId)) as {
+      data?: string;
+    };
+    if (!shot.data) throw new Error("no_screenshot_data");
+    return { base64: shot.data, mime: "image/png" };
+  });
+}
+
 export async function evaluateOnTarget(
   cdpPort: number,
   targetId: string,
   expression: string,
 ): Promise<{ result: unknown; type?: string } | { error: string }> {
-  const wsUrl = await getBrowserWsUrl(cdpPort);
-  if (!wsUrl) return { error: "no_browser_ws" };
-
-  const ws = new WebSocket(wsUrl);
-  await new Promise<void>((resolve, reject) => {
-    ws.once("open", () => resolve());
-    ws.once("error", reject);
-  });
-
-  const cdp = new BrowserCdp(ws);
-  try {
-    const attach = (await cdp.send("Target.attachToTarget", {
-      targetId,
-      flatten: true,
-    })) as { sessionId?: string };
-    const sessionId = attach.sessionId;
-    if (!sessionId) return { error: "attach_no_session" };
-
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
     await cdp.send("Runtime.enable", {}, sessionId);
     const ev = (await cdp.send(
       "Runtime.evaluate",
@@ -134,11 +249,7 @@ export async function evaluateOnTarget(
     )) as { result?: { value?: unknown; type?: string } };
     const r = ev.result;
     return { result: r?.value, type: r?.type };
-  } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e) };
-  } finally {
-    cdp.close();
-  }
+  });
 }
 
 const MAX_OUTER_HTML_CHARS = 1_500_000;
@@ -166,36 +277,20 @@ export async function getTargetDocumentOuterHtml(
   cdpPort: number,
   targetId: string,
 ): Promise<{ html: string; truncated: boolean } | { error: string }> {
-  const wsUrl = await getBrowserWsUrl(cdpPort);
-  if (!wsUrl) return { error: "no_browser_ws" };
-
-  const ws = new WebSocket(wsUrl);
-  await new Promise<void>((resolve, reject) => {
-    ws.once("open", () => resolve());
-    ws.once("error", reject);
-  });
-
-  const cdp = new BrowserCdp(ws);
-  try {
-    const attach = (await cdp.send("Target.attachToTarget", {
-      targetId,
-      flatten: true,
-    })) as { sessionId?: string };
-    const sessionId = attach.sessionId;
-    if (!sessionId) return { error: "attach_no_session" };
-
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
     await cdp.send("DOM.enable", {}, sessionId);
     const doc = (await cdp.send("DOM.getDocument", { depth: 0, pierce: false }, sessionId)) as {
       root?: { nodeId: number };
     };
-    if (!doc.root?.nodeId) return { error: "no_document_root" };
+    if (!doc.root?.nodeId) throw new Error("no_document_root");
 
     const q = (await cdp.send(
       "DOM.querySelector",
       { nodeId: doc.root.nodeId, selector: "html" },
       sessionId,
     )) as { nodeId?: number };
-    if (!q.nodeId) return { error: "no_html_element" };
+    if (!q.nodeId) throw new Error("no_html_element");
 
     const out = (await cdp.send("DOM.getOuterHTML", { nodeId: q.nodeId }, sessionId)) as {
       outerHTML?: string;
@@ -208,11 +303,7 @@ export async function getTargetDocumentOuterHtml(
       };
     }
     return { html: raw, truncated: false };
-  } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e) };
-  } finally {
-    cdp.close();
-  }
+  });
 }
 
 export type ConsoleEntryPreview = {
@@ -233,10 +324,14 @@ export async function collectConsoleMessagesForTarget(
   if (!wsUrl) return { error: "no_browser_ws" };
 
   const ws = new WebSocket(wsUrl);
-  await new Promise<void>((resolve, reject) => {
-    ws.once("open", () => resolve());
-    ws.once("error", reject);
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve());
+      ws.once("error", reject);
+    });
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
 
   const entries: ConsoleEntryPreview[] = [];
   const cdp = new BrowserCdp(ws);
@@ -260,13 +355,7 @@ export async function collectConsoleMessagesForTarget(
   };
 
   try {
-    const attach = (await cdp.send("Target.attachToTarget", {
-      targetId,
-      flatten: true,
-    })) as { sessionId?: string };
-    const sessionId = attach.sessionId;
-    if (!sessionId) return { error: "attach_no_session" };
-
+    const sessionId = await attachToTargetSession(cdp, targetId);
     await cdp.send("Runtime.enable", {}, sessionId);
     const ms = Math.min(Math.max(waitMs, 100), 30_000);
     await new Promise((r) => setTimeout(r, ms));
@@ -279,4 +368,274 @@ export async function collectConsoleMessagesForTarget(
   } finally {
     cdp.close();
   }
+}
+
+/** 导航到 URL 并等待 `Page.loadEventFired`。 */
+export async function openTargetUrl(
+  cdpPort: number,
+  targetId: string,
+  url: string,
+): Promise<{ ok: true } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Page.enable", {}, sessionId);
+    const loadPromise = cdp.waitForProtocolEvent(
+      "Page.loadEventFired",
+      DEFAULT_CDP_TIMEOUT_MS,
+      sessionId,
+    );
+    await cdp.send("Page.navigate", { url }, sessionId);
+    await loadPromise;
+    return { ok: true as const };
+  });
+}
+
+/** `Network.enable` + `Network.getCookies`（只读）。 */
+export async function getNetworkCookiesForTarget(
+  cdpPort: number,
+  targetId: string,
+  urls?: string[],
+): Promise<{ cookies: unknown[] } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Network.enable", {}, sessionId);
+    const res = (await cdp.send(
+      "Network.getCookies",
+      urls?.length ? { urls } : {},
+      sessionId,
+    )) as { cookies?: unknown[] };
+    return { cookies: res.cookies ?? [] };
+  });
+}
+
+function evalValue(
+  cdp: BrowserCdp,
+  sessionId: string,
+  expression: string,
+): Promise<unknown> {
+  return cdp
+    .send(
+      "Runtime.evaluate",
+      { expression, returnByValue: true, awaitPromise: true },
+      sessionId,
+    )
+    .then((raw) => {
+      const ev = raw as { result?: { value?: unknown } };
+      return ev.result?.value;
+    });
+}
+
+/** 在元素中心近似点击（需脚本能力以解析 selector）。 */
+export async function clickOnTarget(
+  cdpPort: number,
+  targetId: string,
+  selector: string,
+): Promise<{ ok: true } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Runtime.enable", {}, sessionId);
+    const expr = `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`;
+    const pos = await evalValue(cdp, sessionId, expr) as { x: number; y: number } | null;
+    if (!pos || typeof pos.x !== "number" || typeof pos.y !== "number") {
+      throw new Error("click_no_element");
+    }
+    await cdp.send(
+      "Input.dispatchMouseEvent",
+      {
+        type: "mousePressed",
+        x: pos.x,
+        y: pos.y,
+        button: "left",
+        clickCount: 1,
+      },
+      sessionId,
+    );
+    await cdp.send(
+      "Input.dispatchMouseEvent",
+      {
+        type: "mouseReleased",
+        x: pos.x,
+        y: pos.y,
+        button: "left",
+        clickCount: 1,
+      },
+      sessionId,
+    );
+    return { ok: true as const };
+  });
+}
+
+/** 聚焦元素并 `Input.insertText`。 */
+export async function typeOnTarget(
+  cdpPort: number,
+  targetId: string,
+  selector: string,
+  text: string,
+): Promise<{ ok: true } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Runtime.enable", {}, sessionId);
+    const focused = (await evalValue(
+      cdp,
+      sessionId,
+      `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; el.focus(); return true; })()`,
+    )) as boolean;
+    if (!focused) throw new Error("type_no_element");
+    await cdp.send("Input.insertText", { text }, sessionId);
+    return { ok: true as const };
+  });
+}
+
+export async function scrollOnTarget(
+  cdpPort: number,
+  targetId: string,
+  opts: { selector?: string; deltaX?: number; deltaY?: number },
+): Promise<{ ok: true } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Runtime.enable", {}, sessionId);
+    if (opts.selector) {
+      await evalValue(
+        cdp,
+        sessionId,
+        `document.querySelector(${JSON.stringify(opts.selector)})?.scrollIntoView({ block: 'center' })`,
+      );
+    } else {
+      const dx = opts.deltaX ?? 0;
+      const dy = opts.deltaY ?? 0;
+      await evalValue(cdp, sessionId, `window.scrollBy(${dx}, ${dy})`);
+    }
+    return { ok: true as const };
+  });
+}
+
+const KEY_DEF: Record<string, { key: string; code: string; vk?: number }> = {
+  Enter: { key: "Enter", code: "Enter", vk: 13 },
+  Tab: { key: "Tab", code: "Tab", vk: 9 },
+  Escape: { key: "Escape", code: "Escape", vk: 27 },
+  Backspace: { key: "Backspace", code: "Backspace", vk: 8 },
+  ArrowDown: { key: "ArrowDown", code: "ArrowDown", vk: 40 },
+  ArrowUp: { key: "ArrowUp", code: "ArrowUp", vk: 38 },
+  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", vk: 37 },
+  ArrowRight: { key: "ArrowRight", code: "ArrowRight", vk: 39 },
+};
+
+/** 派发一次按键（keyDown + keyUp），`key` 可为常见名或单字符。 */
+export async function keysOnTarget(
+  cdpPort: number,
+  targetId: string,
+  key: string,
+): Promise<{ ok: true } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Runtime.enable", {}, sessionId);
+    const def = KEY_DEF[key] ??
+      (key.length === 1 ? { key, code: `Key${key.toUpperCase()}`, vk: key.toUpperCase().charCodeAt(0) } : undefined);
+    if (!def) throw new Error("keys_unknown");
+
+    const down: Record<string, unknown> = {
+      type: "keyDown",
+      key: def.key,
+      code: def.code,
+      windowsVirtualKeyCode: def.vk,
+      nativeVirtualKeyCode: def.vk,
+    };
+    const up = { ...down, type: "keyUp" };
+    await cdp.send("Input.dispatchKeyEvent", down, sessionId);
+    await cdp.send("Input.dispatchKeyEvent", up, sessionId);
+    return { ok: true as const };
+  });
+}
+
+export async function selectOnTarget(
+  cdpPort: number,
+  targetId: string,
+  selector: string,
+  value: string,
+): Promise<{ ok: true } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Runtime.enable", {}, sessionId);
+    const ok = (await evalValue(
+      cdp,
+      sessionId,
+      `(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el || el.tagName !== 'SELECT') return false;
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`,
+    )) as boolean;
+    if (!ok) throw new Error("select_failed");
+    return { ok: true as const };
+  });
+}
+
+export async function waitOnTarget(
+  cdpPort: number,
+  targetId: string,
+  opts: { ms?: number; selector?: string; timeoutMs?: number },
+): Promise<{ ok: true } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
+    const capMs = 60_000;
+    if (typeof opts.ms === "number" && opts.ms > 0) {
+      await new Promise((r) => setTimeout(r, Math.min(opts.ms!, capMs)));
+    }
+    if (opts.selector) {
+      await cdp.send("Runtime.enable", {}, sessionId);
+      const deadline = Date.now() + Math.min(opts.timeoutMs ?? DEFAULT_CDP_TIMEOUT_MS, capMs);
+      const selExpr = `!!document.querySelector(${JSON.stringify(opts.selector)})`;
+      while (Date.now() < deadline) {
+        const hit = (await evalValue(cdp, sessionId, selExpr)) as boolean;
+        if (hit) return { ok: true as const };
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error("wait_timeout");
+    }
+    return { ok: true as const };
+  });
+}
+
+export async function navigateBackOnTarget(
+  cdpPort: number,
+  targetId: string,
+): Promise<{ ok: true } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Page.enable", {}, sessionId);
+    const hist = (await cdp.send("Page.getNavigationHistory", {}, sessionId)) as {
+      currentIndex?: number;
+      entries?: Array<{ id: number }>;
+    };
+    const idx = hist.currentIndex;
+    const entries = hist.entries;
+    if (idx === undefined || !entries || idx <= 0) throw new Error("no_history_back");
+    const entryId = entries[idx - 1]?.id;
+    if (entryId === undefined) throw new Error("no_history_back");
+    const loadPromise = cdp.waitForProtocolEvent(
+      "Page.loadEventFired",
+      DEFAULT_CDP_TIMEOUT_MS,
+      sessionId,
+    );
+    await cdp.send("Page.navigateToHistoryEntry", { entryId }, sessionId);
+    await loadPromise;
+    return { ok: true as const };
+  });
+}
+
+export async function closeTarget(
+  cdpPort: number,
+  targetId: string,
+): Promise<{ ok: true } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    await cdp.send("Target.closeTarget", { targetId });
+    return { ok: true as const };
+  });
 }

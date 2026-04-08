@@ -25,16 +25,19 @@ describe("agentActionAliases", () => {
     expect(isLegacyAgentActionAlias("get")).toBe(false);
   });
 
-  it("isSupportedAgentCanonical only for implemented actions", () => {
+  it("isSupportedAgentCanonical for OpenCLI-aligned verbs", () => {
     expect(isSupportedAgentCanonical("state")).toBe(true);
     expect(isSupportedAgentCanonical("get")).toBe(true);
-    expect(isSupportedAgentCanonical("open")).toBe(false);
+    expect(isSupportedAgentCanonical("open")).toBe(true);
+    expect(isSupportedAgentCanonical("not-a-real-action")).toBe(false);
   });
 
   it("listAgentActionNamesForVersion includes canonical and legacy names", () => {
     const list = listAgentActionNamesForVersion();
     expect(list).toContain("state");
     expect(list).toContain("get");
+    expect(list).toContain("open");
+    expect(list).toContain("network");
     expect(list).toContain("topology");
     expect(list).toContain("dom");
     expect(list).toContain("console-messages");

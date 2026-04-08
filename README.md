@@ -123,7 +123,7 @@ yarn od -- doctor --app demo-mock
 - Core **默认只监听 127.0.0.1**，请勿在未配置防火墙时绑定 `0.0.0.0`。
 - `/v1/sessions/:id/cdp/`* 为调试流量，**不强制 Bearer**，以便 DevTools / CDP 客户端；依赖 **仅本机回环** 与上游会话隔离。
 - **CDP 等效高权限**：可执行页面脚本与访问调试协议，勿向公网暴露。
-- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；`eval` 类动作需 Profile `**allowScriptExecution: true`**。
+- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close` 等）需 Profile `**allowScriptExecution: true**`；只读类（如 `state`、`get`、`screenshot`、`network`、`console-messages`）以及仅 `ms`、不含 `selector` 的 `wait` 不需要。
 
 ## 语义层与可观测 API（Bearer）
 
@@ -136,10 +136,32 @@ yarn od -- doctor --app demo-mock
 | `GET /v1/sessions/:id/metrics`                              | 子进程 CPU/内存；不可得时 `metrics: null` + `reason`                                                                               |
 | `GET /v1/sessions/:id/logs/export?format=jsonl&level=error` | 服务端过滤后导出（`format=txt` 亦可）                                                                                                |
 | `GET /v1/agent/sessions/:id/snapshot`                       | OODA 结构化快照（拓扑摘要、错误计数、指标等）                                                                                                |
-| `POST /v1/agent/sessions/:id/actions`                       | JSON：`action` 使用 **动词层**（与 OpenCLI operate 对齐）：`state`（拓扑快照）、`get`（整页 `outerHTML`，旧名 `dom`）、`screenshot`、`eval`、`console-messages`。历史别名仍可用：`topology`→`state`、`dom`→`get`。`GET /v1/version` 的 `agentActions` 同时列出 canonical 与旧名。 |
+| `POST /v1/agent/sessions/:id/actions`                       | JSON：`action` 使用与 **OpenCLI `operate`** 同一套动词标识（见下表）。`GET /v1/version` 的 `agentActions` 列出当前接受的 canonical 名与历史别名。 |
 
 
 `GET /v1/version` 的 `capabilities` 数组可用来探测是否启用 Agent 等。
+
+**Agent 动词表（与 OpenCLI README 对齐，含实现状态）**
+
+| `action` | 说明 | 主要请求字段 | 实现状态 |
+|----------|------|----------------|----------|
+| `open` | 导航到 `url` 并等待加载 | `targetId`, `url` | 已实现（需 `allowScriptExecution`） |
+| `state` | 窗口/目标拓扑快照（同 list-window 数据形态） | `targetId` 不需要 | 已实现 |
+| `click` | 在 `selector` 中心近似点击 | `targetId`, `selector` | 已实现（需脚本） |
+| `type` | 聚焦元素并插入文本 | `targetId`, `selector`, `text` | 已实现（需脚本） |
+| `select` | 设置 `<select>` 值并触发 `change` | `targetId`, `selector`, `value` | 已实现（需脚本） |
+| `keys` | 派发按键（`key` 为常用名或单字符） | `targetId`, `key` | 已实现（需脚本） |
+| `wait` | 延时 `ms` 和/或等待 `selector` 出现 | `targetId`, `ms` / `selector`, 可选 `timeoutMs` | 已实现（含 `selector` 时需脚本） |
+| `get` | 整页 `outerHTML`（可能截断） | `targetId` | 已实现 |
+| `screenshot` | PNG Base64 | `targetId` | 已实现 |
+| `scroll` | `selector` 滚入视窗，或 `deltaX`/`deltaY` | `targetId`, 可选 `selector` / `deltaX` / `deltaY` | 已实现（需脚本） |
+| `back` | 历史后退并等待加载 | `targetId` | 已实现（需脚本） |
+| `eval` | `Runtime.evaluate` | `targetId`, `expression` | 已实现（需脚本） |
+| `network` | 只读 Cookie（`Network.getCookies`） | `targetId`, 可选 `urls` 数组 | 已实现 |
+| `init` | 对齐 OpenCLI 的初始化语义 | 无额外必填 | 已实现（Core 侧 no-op 说明） |
+| `verify` | 表达式求值须为 truthy | `targetId`, `expression` | 已实现（需脚本） |
+| `close` | `Target.closeTarget` 关闭调试目标 | `targetId` | 已实现（需脚本） |
+| `console-messages` | 短时采样控制台 | `targetId`, 可选 `waitMs` | 已实现（OpenDesktop 扩展，非 OpenCLI 表内） |
 
 **Agent `action` 别名（旧客户端兼容）**
 

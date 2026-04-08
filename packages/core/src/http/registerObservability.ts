@@ -2,9 +2,19 @@ import { Router, type Request, type Response } from "express";
 import { appendAudit } from "../audit.js";
 import {
   captureTargetScreenshot,
+  clickOnTarget,
+  closeTarget,
   collectConsoleMessagesForTarget,
   evaluateOnTarget,
+  getNetworkCookiesForTarget,
   getTargetDocumentOuterHtml,
+  keysOnTarget,
+  navigateBackOnTarget,
+  openTargetUrl,
+  scrollOnTarget,
+  selectOnTarget,
+  typeOnTarget,
+  waitOnTarget,
 } from "../cdp/browserClient.js";
 import {
   isLegacyAgentActionAlias,
@@ -130,6 +140,16 @@ export function registerObservabilityRoutes(v1: Router, deps: ObsDeps): void {
       expression?: string;
       /** 控制台采样等待毫秒（console-messages） */
       waitMs?: number;
+      url?: string;
+      urls?: unknown;
+      selector?: string;
+      text?: string;
+      value?: string;
+      key?: string;
+      deltaX?: number;
+      deltaY?: number;
+      ms?: number;
+      timeoutMs?: number;
     };
     const actionRaw = typeof body.action === "string" ? body.action.trim() : "";
     if (!actionRaw) return jsonError(res, 400, "VALIDATION_ERROR", "action required");
@@ -226,6 +246,257 @@ export function registerObservabilityRoutes(v1: Router, deps: ObsDeps): void {
         }
         await audit(true, { targetId: body.targetId });
         return res.json({ entries: cons.entries, note: cons.note, waitMs });
+      }
+      if (canonical === "init") {
+        await audit(true);
+        return res.json({
+          ok: true,
+          note: "无需额外初始化：Core 会话已就绪。可直接使用 state / open / get 等动作。",
+        });
+      }
+      if (canonical === "open") {
+        if (!ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        if (!body.targetId || typeof body.url !== "string" || !body.url.trim()) {
+          await audit(false, { reason: "missing_params" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId and url required for ${actionRaw}`);
+        }
+        const opened = await openTargetUrl(ctx.cdpPort, body.targetId, body.url.trim());
+        if ("error" in opened) {
+          await audit(false, { reason: opened.error });
+          return jsonError(res, 502, "OPEN_FAILED", opened.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ ok: true });
+      }
+      if (canonical === "network") {
+        if (!body.targetId) {
+          await audit(false, { reason: "missing_targetId" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId required for ${actionRaw}`);
+        }
+        const urls = Array.isArray(body.urls)
+          ? body.urls.filter((u): u is string => typeof u === "string" && u.length > 0)
+          : undefined;
+        const net = await getNetworkCookiesForTarget(
+          ctx.cdpPort,
+          body.targetId,
+          urls?.length ? urls : undefined,
+        );
+        if ("error" in net) {
+          await audit(false, { reason: net.error });
+          return jsonError(res, 502, "NETWORK_FAILED", net.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ cookies: net.cookies });
+      }
+      if (canonical === "click") {
+        if (!ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        if (!body.targetId || typeof body.selector !== "string" || !body.selector.trim()) {
+          await audit(false, { reason: "missing_params" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId and selector required for ${actionRaw}`);
+        }
+        const r = await clickOnTarget(ctx.cdpPort, body.targetId, body.selector.trim());
+        if ("error" in r) {
+          await audit(false, { reason: r.error });
+          return jsonError(res, 502, "CLICK_FAILED", r.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ ok: true });
+      }
+      if (canonical === "type") {
+        if (!ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        if (
+          !body.targetId ||
+          typeof body.selector !== "string" ||
+          !body.selector.trim() ||
+          typeof body.text !== "string"
+        ) {
+          await audit(false, { reason: "missing_params" });
+          return jsonError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            `targetId, selector and text required for ${actionRaw}`,
+          );
+        }
+        const r = await typeOnTarget(ctx.cdpPort, body.targetId, body.selector.trim(), body.text);
+        if ("error" in r) {
+          await audit(false, { reason: r.error });
+          return jsonError(res, 502, "TYPE_FAILED", r.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ ok: true });
+      }
+      if (canonical === "select") {
+        if (!ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        if (
+          !body.targetId ||
+          typeof body.selector !== "string" ||
+          !body.selector.trim() ||
+          typeof body.value !== "string"
+        ) {
+          await audit(false, { reason: "missing_params" });
+          return jsonError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            `targetId, selector and value required for ${actionRaw}`,
+          );
+        }
+        const r = await selectOnTarget(ctx.cdpPort, body.targetId, body.selector.trim(), body.value);
+        if ("error" in r) {
+          await audit(false, { reason: r.error });
+          return jsonError(res, 502, "SELECT_FAILED", r.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ ok: true });
+      }
+      if (canonical === "keys") {
+        if (!ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        if (!body.targetId || typeof body.key !== "string" || !body.key.trim()) {
+          await audit(false, { reason: "missing_params" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId and key required for ${actionRaw}`);
+        }
+        const r = await keysOnTarget(ctx.cdpPort, body.targetId, body.key.trim());
+        if ("error" in r) {
+          await audit(false, { reason: r.error });
+          return jsonError(res, 502, "KEYS_FAILED", r.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ ok: true });
+      }
+      if (canonical === "scroll") {
+        if (!ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        if (!body.targetId) {
+          await audit(false, { reason: "missing_targetId" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId required for ${actionRaw}`);
+        }
+        const selector = typeof body.selector === "string" ? body.selector.trim() : "";
+        const r = await scrollOnTarget(ctx.cdpPort, body.targetId, {
+          selector: selector || undefined,
+          deltaX: body.deltaX,
+          deltaY: body.deltaY,
+        });
+        if ("error" in r) {
+          await audit(false, { reason: r.error });
+          return jsonError(res, 502, "SCROLL_FAILED", r.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ ok: true });
+      }
+      if (canonical === "wait") {
+        if (!body.targetId) {
+          await audit(false, { reason: "missing_targetId" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId required for ${actionRaw}`);
+        }
+        const hasMs = typeof body.ms === "number" && Number.isFinite(body.ms) && body.ms > 0;
+        const hasSel = typeof body.selector === "string" && body.selector.trim().length > 0;
+        if (!hasMs && !hasSel) {
+          await audit(false, { reason: "missing_params" });
+          return jsonError(
+            res,
+            400,
+            "VALIDATION_ERROR",
+            `ms and/or selector required for ${actionRaw}`,
+          );
+        }
+        if (hasSel && !ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        const tm =
+          typeof body.timeoutMs === "number" && Number.isFinite(body.timeoutMs)
+            ? body.timeoutMs
+            : undefined;
+        const r = await waitOnTarget(ctx.cdpPort, body.targetId, {
+          ms: hasMs ? body.ms : undefined,
+          selector: hasSel ? body.selector!.trim() : undefined,
+          timeoutMs: tm,
+        });
+        if ("error" in r) {
+          await audit(false, { reason: r.error });
+          return jsonError(res, 502, "WAIT_FAILED", r.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ ok: true });
+      }
+      if (canonical === "back") {
+        if (!ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        if (!body.targetId) {
+          await audit(false, { reason: "missing_targetId" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId required for ${actionRaw}`);
+        }
+        const r = await navigateBackOnTarget(ctx.cdpPort, body.targetId);
+        if ("error" in r) {
+          await audit(false, { reason: r.error });
+          return jsonError(res, 502, "BACK_FAILED", r.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ ok: true });
+      }
+      if (canonical === "verify") {
+        if (!ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        if (!body.targetId || body.expression === undefined || body.expression === "") {
+          await audit(false, { reason: "missing_params" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId and expression required for ${actionRaw}`);
+        }
+        const ev = await evaluateOnTarget(ctx.cdpPort, body.targetId, body.expression);
+        if ("error" in ev) {
+          await audit(false, { reason: ev.error });
+          return jsonError(res, 502, "VERIFY_FAILED", ev.error);
+        }
+        const ok = Boolean(ev.result);
+        if (!ok) {
+          await audit(false, { reason: "not_truthy" });
+          return jsonError(
+            res,
+            400,
+            "VERIFY_FAILED",
+            "expression did not yield a truthy value",
+          );
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ ok: true, result: ev.result, type: ev.type });
+      }
+      if (canonical === "close") {
+        if (!ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        if (!body.targetId) {
+          await audit(false, { reason: "missing_targetId" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId required for ${actionRaw}`);
+        }
+        const r = await closeTarget(ctx.cdpPort, body.targetId);
+        if ("error" in r) {
+          await audit(false, { reason: r.error });
+          return jsonError(res, 502, "CLOSE_FAILED", r.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ ok: true });
       }
       return jsonError(res, 500, "INTERNAL_ERROR", `Unhandled agent action: ${canonical}`);
     } catch (e) {
