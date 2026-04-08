@@ -82,7 +82,7 @@ function cdpJsonListUrl(apiRoot: string, sessionId: string): string {
 }
 
 /**
- * 将 CDP 返回的 `webSocketDebuggerUrl` 转为 Chrome 可打开的 devtools:// 链接（实验性质，依赖本机 Chrome）。
+ * 将 CDP 返回的 `webSocketDebuggerUrl` 转为 Chrome 地址栏可用的 devtools:// 链接（须用户手动粘贴，网页内禁止跳转该协议）。
  */
 function webSocketToDevtoolsInspectorUrl(wsUrl: string): string | null {
   try {
@@ -624,7 +624,7 @@ function PageTargetScreenshot({
     }
   }, [postAgent, tokenOk]);
 
-  const runOpenDevtoolsExperimental = useCallback(async () => {
+  const copyDevToolsFromJsonList = useCallback(async () => {
     setDevLoading(true);
     setDevErr(null);
     try {
@@ -634,33 +634,16 @@ function PageTargetScreenshot({
       if (!Array.isArray(arr)) throw new Error("json/list 响应不是数组");
       const row = arr.find((x) => x.id === targetId);
       const ws = row?.webSocketDebuggerUrl;
-      if (!ws) throw new Error("当前 target 在 json/list 中无 webSocketDebuggerUrl（请确认 targetId 仍有效）");
-      const devUrl = webSocketToDevtoolsInspectorUrl(ws);
-      if (!devUrl) throw new Error("无法从 WebSocket URL 生成 devtools:// 链接");
-      window.open(devUrl, "_blank", "noopener,noreferrer");
-    } catch (e) {
-      setDevErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setDevLoading(false);
-    }
-  }, [jsonListUrl, targetId]);
-
-  const copyDevToolsFromJsonList = useCallback(async () => {
-    setDevErr(null);
-    try {
-      const r = await fetch(jsonListUrl);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const arr = (await r.json()) as Array<{ id?: string; webSocketDebuggerUrl?: string }>;
-      const row = arr.find((x) => x.id === targetId);
-      const ws = row?.webSocketDebuggerUrl;
       if (!ws) throw new Error("未找到该 target 的 WebSocket URL");
       const devUrl = webSocketToDevtoolsInspectorUrl(ws);
       if (!devUrl) throw new Error("无法生成 devtools:// 链接");
       await copyToClipboard(devUrl);
       setDevToolsUrlCopied(true);
-      window.setTimeout(() => setDevToolsUrlCopied(false), 2000);
+      window.setTimeout(() => setDevToolsUrlCopied(false), 2500);
     } catch (e) {
       setDevErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDevLoading(false);
     }
   }, [jsonListUrl, targetId]);
 
@@ -739,7 +722,8 @@ function PageTargetScreenshot({
           <strong>直连 host:port</strong>（与 CDP 网关不同：inspect 要连子进程调试端口）。在列表中选中与当前
           URL/title 一致的 page。路线 B：用 <code style={{ fontSize: 10 }}>json/list</code> 取{" "}
           <code style={{ fontSize: 10 }}>webSocketDebuggerUrl</code> 生成 <code style={{ fontSize: 10 }}>devtools://</code>
-          ，可复制或尝试「打开 DevTools」。
+          。浏览器<strong>不允许</strong>从普通网页用脚本打开该协议（会报 Not allowed to load local resource）；请点下方按钮复制后，到
+          本机 <strong>Chrome 地址栏手动粘贴并回车</strong>。
         </p>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
           {directInspectAddr && (
@@ -771,15 +755,11 @@ function PageTargetScreenshot({
             onClick={() => void copyDevToolsFromJsonList()}
             style={pageInspectorBtnStyle(devLoading)}
           >
-            {devToolsUrlCopied ? "已复制 devtools://" : "复制 devtools:// 链接"}
-          </button>
-          <button
-            type="button"
-            disabled={devLoading}
-            onClick={() => void runOpenDevtoolsExperimental()}
-            style={pageInspectorBtnStyle(devLoading)}
-          >
-            {devLoading ? "拉取中…" : "实验：打开 DevTools"}
+            {devLoading
+              ? "拉取 json/list…"
+              : devToolsUrlCopied
+                ? "已复制 — 请粘贴到 Chrome 地址栏"
+                : "复制 devtools:// 链接"}
           </button>
         </div>
         {devErr && (
@@ -965,7 +945,7 @@ function TopologyVisual({
           <code style={{ fontSize: 11 }}>screenshot</code> / <code style={{ fontSize: 11 }}>dom</code> /{" "}
           <code style={{ fontSize: 11 }}>console-messages</code>
           （默认不自动拉取）。下方「DevTools 附加」提供 <code style={{ fontSize: 11 }}>chrome://inspect</code>{" "}
-          用直连端口、CDP 网关与 <code style={{ fontSize: 11 }}>devtools://</code> 实验入口。控制台为短时监听，无历史回溯。需 Core
+          用直连端口、CDP 网关与 <code style={{ fontSize: 11 }}>devtools://</code>（须复制到 Chrome 地址栏）。控制台为短时监听，无历史回溯。需 Core
           开启 Agent API（可用 <code style={{ fontSize: 11 }}>OPENDESKTOP_AGENT_API=0</code> 关闭）。
           若出现 <code style={{ fontSize: 11 }}>Unknown action: dom</code>，说明运行的 Core 仍是旧构建：请在{" "}
           <code style={{ fontSize: 11 }}>packages/core</code> 执行 <code style={{ fontSize: 11 }}>yarn build</code>{" "}
