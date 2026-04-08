@@ -76,6 +76,25 @@ function cdpGatewayHttpUrl(apiRoot: string, sessionId: string): string {
   return `${origin}/v1/sessions/${sessionId}/cdp`;
 }
 
+/** 经 Core 代理的 CDP `/json/list`（无需 Bearer；与 Playwright 使用同一网关根） */
+function cdpJsonListUrl(apiRoot: string, sessionId: string): string {
+  return `${cdpGatewayHttpUrl(apiRoot, sessionId)}/json/list`;
+}
+
+/**
+ * 将 CDP 返回的 `webSocketDebuggerUrl` 转为 Chrome 可打开的 devtools:// 链接（实验性质，依赖本机 Chrome）。
+ */
+function webSocketToDevtoolsInspectorUrl(wsUrl: string): string | null {
+  try {
+    const u = new URL(wsUrl);
+    if (u.protocol !== "ws:" && u.protocol !== "wss:") return null;
+    const wsParam = `${u.host}${u.pathname}${u.search}`;
+    return `devtools://devtools/bundled/inspector.html?ws=${encodeURIComponent(wsParam)}`;
+  } catch {
+    return null;
+  }
+}
+
 async function copyToClipboard(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text);
@@ -473,6 +492,8 @@ type TopologySnapshotContext = {
   sessionId: string;
   apiRoot: string;
   token: string;
+  /** 子进程远程调试端口；用于 chrome://inspect「配置网络目标」 */
+  cdpDirectPort?: number;
 };
 
 function pageInspectorBtnStyle(loading: boolean): React.CSSProperties {
@@ -514,7 +535,16 @@ function PageTargetScreenshot({
   const [conNote, setConNote] = useState<string | null>(null);
   const [conErr, setConErr] = useState<string | null>(null);
 
+  const [devLoading, setDevLoading] = useState(false);
+  const [devErr, setDevErr] = useState<string | null>(null);
+  const [devToolsUrlCopied, setDevToolsUrlCopied] = useState(false);
+
   const tokenOk = ctx.token.trim().length > 0;
+
+  const gatewayRoot = cdpGatewayHttpUrl(ctx.apiRoot, ctx.sessionId);
+  const jsonListUrl = `${gatewayRoot}/json/list`;
+  const directInspectAddr =
+    typeof ctx.cdpDirectPort === "number" ? `127.0.0.1:${ctx.cdpDirectPort}` : null;
 
   const postAgent = useCallback(
     async (payload: Record<string, unknown>) => {
@@ -594,6 +624,46 @@ function PageTargetScreenshot({
     }
   }, [postAgent, tokenOk]);
 
+  const runOpenDevtoolsExperimental = useCallback(async () => {
+    setDevLoading(true);
+    setDevErr(null);
+    try {
+      const r = await fetch(jsonListUrl);
+      if (!r.ok) throw new Error(`拉取 json/list 失败 HTTP ${r.status}`);
+      const arr = (await r.json()) as Array<{ id?: string; webSocketDebuggerUrl?: string }>;
+      if (!Array.isArray(arr)) throw new Error("json/list 响应不是数组");
+      const row = arr.find((x) => x.id === targetId);
+      const ws = row?.webSocketDebuggerUrl;
+      if (!ws) throw new Error("当前 target 在 json/list 中无 webSocketDebuggerUrl（请确认 targetId 仍有效）");
+      const devUrl = webSocketToDevtoolsInspectorUrl(ws);
+      if (!devUrl) throw new Error("无法从 WebSocket URL 生成 devtools:// 链接");
+      window.open(devUrl, "_blank", "noopener,noreferrer");
+    } catch (e) {
+      setDevErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDevLoading(false);
+    }
+  }, [jsonListUrl, targetId]);
+
+  const copyDevToolsFromJsonList = useCallback(async () => {
+    setDevErr(null);
+    try {
+      const r = await fetch(jsonListUrl);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const arr = (await r.json()) as Array<{ id?: string; webSocketDebuggerUrl?: string }>;
+      const row = arr.find((x) => x.id === targetId);
+      const ws = row?.webSocketDebuggerUrl;
+      if (!ws) throw new Error("未找到该 target 的 WebSocket URL");
+      const devUrl = webSocketToDevtoolsInspectorUrl(ws);
+      if (!devUrl) throw new Error("无法生成 devtools:// 链接");
+      await copyToClipboard(devUrl);
+      setDevToolsUrlCopied(true);
+      window.setTimeout(() => setDevToolsUrlCopied(false), 2000);
+    } catch (e) {
+      setDevErr(e instanceof Error ? e.message : String(e));
+    }
+  }, [jsonListUrl, targetId]);
+
   if (!enabled) return null;
 
   if (!tokenOk) {
@@ -652,6 +722,69 @@ function PageTargetScreenshot({
         >
           {conLabel}
         </button>
+      </div>
+      <div
+        style={{
+          marginBottom: 10,
+          padding: 10,
+          borderRadius: 8,
+          background: "#f8fafc",
+          border: `1px dashed ${OBS_PALETTE.border}`,
+        }}
+      >
+        <div style={{ fontSize: 11, fontWeight: 600, color: "#334155", marginBottom: 6 }}>DevTools 附加</div>
+        <p style={{ margin: "0 0 8px", fontSize: 11, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
+          路线 A：在本机 Chrome 打开{" "}
+          <code style={{ fontSize: 10 }}>chrome://inspect/#devices</code> →「发现网络目标」→「配置」→ 填入下述{" "}
+          <strong>直连 host:port</strong>（与 CDP 网关不同：inspect 要连子进程调试端口）。在列表中选中与当前
+          URL/title 一致的 page。路线 B：用 <code style={{ fontSize: 10 }}>json/list</code> 取{" "}
+          <code style={{ fontSize: 10 }}>webSocketDebuggerUrl</code> 生成 <code style={{ fontSize: 10 }}>devtools://</code>
+          ，可复制或尝试「打开 DevTools」。
+        </p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+          {directInspectAddr && (
+            <button
+              type="button"
+              onClick={() => void copyToClipboard(directInspectAddr)}
+              style={pageInspectorBtnStyle(false)}
+            >
+              复制 inspect 用 host:port
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void copyToClipboard(gatewayRoot)}
+            style={pageInspectorBtnStyle(false)}
+          >
+            复制 CDP 网关根
+          </button>
+          <button
+            type="button"
+            onClick={() => void copyToClipboard(jsonListUrl)}
+            style={pageInspectorBtnStyle(false)}
+          >
+            复制 json/list URL
+          </button>
+          <button
+            type="button"
+            disabled={devLoading}
+            onClick={() => void copyDevToolsFromJsonList()}
+            style={pageInspectorBtnStyle(devLoading)}
+          >
+            {devToolsUrlCopied ? "已复制 devtools://" : "复制 devtools:// 链接"}
+          </button>
+          <button
+            type="button"
+            disabled={devLoading}
+            onClick={() => void runOpenDevtoolsExperimental()}
+            style={pageInspectorBtnStyle(devLoading)}
+          >
+            {devLoading ? "拉取中…" : "实验：打开 DevTools"}
+          </button>
+        </div>
+        {devErr && (
+          <div style={{ marginTop: 8, fontSize: 11, color: "#991b1b", lineHeight: 1.4 }}>DevTools：{devErr}</div>
+        )}
       </div>
       {shotSrc && (
         <div
@@ -831,8 +964,9 @@ function TopologyVisual({
           每个 <strong>page</strong> 卡片顶部可「截取页面」「DOM 结构」「控制台」：对应{" "}
           <code style={{ fontSize: 11 }}>screenshot</code> / <code style={{ fontSize: 11 }}>dom</code> /{" "}
           <code style={{ fontSize: 11 }}>console-messages</code>
-          （默认不自动拉取）。控制台为短时监听，无历史回溯。需 Core 开启 Agent API（可用{" "}
-          <code style={{ fontSize: 11 }}>OPENDESKTOP_AGENT_API=0</code> 关闭）。
+          （默认不自动拉取）。下方「DevTools 附加」提供 <code style={{ fontSize: 11 }}>chrome://inspect</code>{" "}
+          用直连端口、CDP 网关与 <code style={{ fontSize: 11 }}>devtools://</code> 实验入口。控制台为短时监听，无历史回溯。需 Core
+          开启 Agent API（可用 <code style={{ fontSize: 11 }}>OPENDESKTOP_AGENT_API=0</code> 关闭）。
           若出现 <code style={{ fontSize: 11 }}>Unknown action: dom</code>，说明运行的 Core 仍是旧构建：请在{" "}
           <code style={{ fontSize: 11 }}>packages/core</code> 执行 <code style={{ fontSize: 11 }}>yarn build</code>{" "}
           后重启进程；自检 <code style={{ fontSize: 11 }}>GET /v1/version</code> 应包含{" "}
@@ -2203,7 +2337,12 @@ export function App() {
                         loading={!!detailLoading}
                         topologySnapshotCtx={
                           panelKind === "list-window" && detailId
-                            ? { sessionId: detailId, apiRoot: apiRoot ?? "", token: tokenTrimmed }
+                            ? {
+                                sessionId: detailId,
+                                apiRoot: apiRoot ?? "",
+                                token: tokenTrimmed,
+                                cdpDirectPort: sessions.find((s) => s.id === detailId)?.cdpPort,
+                              }
                             : undefined
                         }
                       />
