@@ -95,6 +95,17 @@ function webSocketToDevtoolsInspectorUrl(wsUrl: string): string | null {
   }
 }
 
+function formatOsWindowState(raw?: string): string {
+  if (!raw) return "—";
+  const m: Record<string, string> = {
+    normal: "正常",
+    minimized: "最小化",
+    maximized: "最大化",
+    fullscreen: "全屏",
+  };
+  return m[raw] ?? raw;
+}
+
 async function copyToClipboard(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text);
@@ -496,6 +507,14 @@ type TopologySnapshotContext = {
   cdpDirectPort?: number;
 };
 
+type AgentWindowState = {
+  bounds: { left: number; top: number; width: number; height: number };
+  windowState?: string;
+  pageVisibility?: string;
+  pageHasFocus?: boolean;
+  pageMetricsNote?: string;
+};
+
 function pageInspectorBtnStyle(loading: boolean): React.CSSProperties {
   return {
     padding: "6px 12px",
@@ -538,6 +557,11 @@ function PageTargetScreenshot({
   const [devLoading, setDevLoading] = useState(false);
   const [devErr, setDevErr] = useState<string | null>(null);
   const [devToolsUrlCopied, setDevToolsUrlCopied] = useState(false);
+
+  const [winInfo, setWinInfo] = useState<AgentWindowState | null>(null);
+  const [winErr, setWinErr] = useState<string | null>(null);
+  const [winLoading, setWinLoading] = useState(false);
+  const [focusLoading, setFocusLoading] = useState(false);
 
   const tokenOk = ctx.token.trim().length > 0;
 
@@ -647,6 +671,55 @@ function PageTargetScreenshot({
     }
   }, [jsonListUrl, targetId]);
 
+  const refreshWindowState = useCallback(async () => {
+    if (!tokenOk) return;
+    setWinLoading(true);
+    setWinErr(null);
+    try {
+      const j = await postAgent({ action: "window-state" });
+      const b = j.bounds as AgentWindowState["bounds"] | undefined;
+      if (!b || typeof b.width !== "number" || typeof b.height !== "number") {
+        throw new Error("响应缺少 bounds");
+      }
+      setWinInfo({
+        bounds: {
+          left: typeof b.left === "number" ? b.left : 0,
+          top: typeof b.top === "number" ? b.top : 0,
+          width: b.width,
+          height: b.height,
+        },
+        windowState: j.windowState as string | undefined,
+        pageVisibility: j.pageVisibility as string | undefined,
+        pageHasFocus: j.pageHasFocus as boolean | undefined,
+        pageMetricsNote: j.pageMetricsNote as string | undefined,
+      });
+    } catch (e) {
+      setWinErr(e instanceof Error ? e.message : String(e));
+      setWinInfo(null);
+    } finally {
+      setWinLoading(false);
+    }
+  }, [postAgent, tokenOk]);
+
+  const runFocusWindow = useCallback(async () => {
+    if (!tokenOk) return;
+    setFocusLoading(true);
+    setWinErr(null);
+    try {
+      await postAgent({ action: "focus-window" });
+      await refreshWindowState();
+    } catch (e) {
+      setWinErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFocusLoading(false);
+    }
+  }, [postAgent, tokenOk, refreshWindowState]);
+
+  useEffect(() => {
+    if (!enabled || !tokenOk) return;
+    void refreshWindowState();
+  }, [enabled, tokenOk, targetId, ctx.sessionId, refreshWindowState]);
+
   if (!enabled) return null;
 
   if (!tokenOk) {
@@ -716,6 +789,77 @@ function PageTargetScreenshot({
         }}
       >
         <div style={{ fontSize: 11, fontWeight: 600, color: "#334155", marginBottom: 6 }}>DevTools 附加</div>
+        <div
+          style={{
+            marginBottom: 10,
+            paddingBottom: 10,
+            borderBottom: `1px solid ${OBS_PALETTE.border}`,
+          }}
+        >
+          <div style={{ fontSize: 11, fontWeight: 600, color: "#475569", marginBottom: 6 }}>窗口状态</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8, alignItems: "center" }}>
+            <button
+              type="button"
+              disabled={winLoading}
+              onClick={() => void refreshWindowState()}
+              style={pageInspectorBtnStyle(winLoading)}
+            >
+              {winLoading ? "刷新中…" : "刷新窗口状态"}
+            </button>
+            <button
+              type="button"
+              disabled={focusLoading}
+              onClick={() => void runFocusWindow()}
+              style={pageInspectorBtnStyle(focusLoading)}
+            >
+              {focusLoading ? "前置中…" : "前置窗口 (Focus)"}
+            </button>
+          </div>
+          {winInfo && (
+            <dl
+              style={{
+                margin: 0,
+                fontSize: 11,
+                color: "#334155",
+                display: "grid",
+                gridTemplateColumns: "auto 1fr",
+                gap: "4px 12px",
+                lineHeight: 1.45,
+              }}
+            >
+              <dt style={{ color: OBS_PALETTE.textMuted }}>尺寸</dt>
+              <dd style={{ margin: 0 }}>
+                {winInfo.bounds.width} × {winInfo.bounds.height} px
+              </dd>
+              <dt style={{ color: OBS_PALETTE.textMuted }}>位置</dt>
+              <dd style={{ margin: 0 }}>
+                ({winInfo.bounds.left}, {winInfo.bounds.top})
+              </dd>
+              <dt style={{ color: OBS_PALETTE.textMuted }}>OS 窗口状态</dt>
+              <dd style={{ margin: 0 }}>{formatOsWindowState(winInfo.windowState)}</dd>
+              {winInfo.pageVisibility !== undefined && (
+                <>
+                  <dt style={{ color: OBS_PALETTE.textMuted }}>文档可见性</dt>
+                  <dd style={{ margin: 0 }}>{winInfo.pageVisibility}</dd>
+                </>
+              )}
+              {winInfo.pageHasFocus !== undefined && (
+                <>
+                  <dt style={{ color: OBS_PALETTE.textMuted }}>文档焦点</dt>
+                  <dd style={{ margin: 0 }}>{winInfo.pageHasFocus ? "是" : "否"}</dd>
+                </>
+              )}
+            </dl>
+          )}
+          {winInfo?.pageMetricsNote && (
+            <p style={{ margin: "8px 0 0", fontSize: 10, color: "#b45309", lineHeight: 1.45 }}>
+              {winInfo.pageMetricsNote}
+            </p>
+          )}
+          {winErr && (
+            <div style={{ marginTop: 8, fontSize: 11, color: "#991b1b", lineHeight: 1.4 }}>窗口：{winErr}</div>
+          )}
+        </div>
         <p style={{ margin: "0 0 8px", fontSize: 11, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
           路线 A：在本机 Chrome 打开{" "}
           <code style={{ fontSize: 10 }}>chrome://inspect/#devices</code> →「发现网络目标」→「配置」→ 填入下述{" "}
@@ -945,7 +1089,7 @@ function TopologyVisual({
           <code style={{ fontSize: 11 }}>screenshot</code> / <code style={{ fontSize: 11 }}>dom</code> /{" "}
           <code style={{ fontSize: 11 }}>console-messages</code>
           （默认不自动拉取）。下方「DevTools 附加」提供 <code style={{ fontSize: 11 }}>chrome://inspect</code>{" "}
-          用直连端口、CDP 网关与 <code style={{ fontSize: 11 }}>devtools://</code>（须复制到 Chrome 地址栏）。控制台为短时监听，无历史回溯。需 Core
+          用直连端口、CDP 网关、<code style={{ fontSize: 11 }}>devtools://</code>（须复制到 Chrome 地址栏）及<strong>窗口状态 / 前置窗口</strong>。控制台为短时监听，无历史回溯。需 Core
           开启 Agent API（可用 <code style={{ fontSize: 11 }}>OPENDESKTOP_AGENT_API=0</code> 关闭）。
           若出现 <code style={{ fontSize: 11 }}>Unknown action: dom</code>，说明运行的 Core 仍是旧构建：请在{" "}
           <code style={{ fontSize: 11 }}>packages/core</code> 执行 <code style={{ fontSize: 11 }}>yarn build</code>{" "}

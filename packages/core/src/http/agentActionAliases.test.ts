@@ -38,6 +38,8 @@ describe("agentActionAliases", () => {
     expect(list).toContain("get");
     expect(list).toContain("open");
     expect(list).toContain("network");
+    expect(list).toContain("window-state");
+    expect(list).toContain("focus-window");
     expect(list).toContain("topology");
     expect(list).toContain("dom");
     expect(list).toContain("console-messages");

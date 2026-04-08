@@ -30,6 +30,8 @@ export const SUPPORTED_AGENT_ACTIONS = [
   "verify",
   "close",
   "console-messages",
+  "window-state",
+  "focus-window",
 ] as const;
 
 /** 仍接受但已归一化的历史 `action` 名（见 {@link LEGACY_TO_CANONICAL}） */

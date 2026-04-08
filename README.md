@@ -123,7 +123,7 @@ yarn od -- doctor --app demo-mock
 - Core **默认只监听 127.0.0.1**，请勿在未配置防火墙时绑定 `0.0.0.0`。
 - `/v1/sessions/:id/cdp/`* 为调试流量，**不强制 Bearer**，以便 DevTools / CDP 客户端；依赖 **仅本机回环** 与上游会话隔离。
 - **CDP 等效高权限**：可执行页面脚本与访问调试协议，勿向公网暴露。
-- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close` 等）需 Profile `**allowScriptExecution: true**`；只读类（如 `state`、`get`、`screenshot`、`network`、`console-messages`）以及仅 `ms`、不含 `selector` 的 `wait` 不需要。
+- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close` 等）需 Profile `**allowScriptExecution: true**`；只读类（如 `state`、`get`、`screenshot`、`network`、`console-messages`、`window-state`）以及仅 `ms`、不含 `selector` 的 `wait`、以及窗口前置 `focus-window` 不需要。
 
 ## 语义层与可观测 API（Bearer）
 
@@ -161,6 +161,8 @@ yarn od -- doctor --app demo-mock
 | `init` | 对齐 OpenCLI 的初始化语义 | 无额外必填 | 已实现（Core 侧 no-op 说明） |
 | `verify` | 表达式求值须为 truthy | `targetId`, `expression` | 已实现（需脚本） |
 | `close` | `Target.closeTarget` 关闭调试目标 | `targetId` | 已实现（需脚本） |
+| `window-state` | 宿主窗口尺寸/位置、`windowState`；若 Profile 允许脚本则附带 `document.visibilityState` 与 `document.hasFocus` | `targetId` | 已实现（扩展） |
+| `focus-window` | `Page.bringToFront`，尝试激活该 target 所在窗口 | `targetId` | 已实现（扩展） |
 | `console-messages` | 短时采样控制台 | `targetId`, 可选 `waitMs` | 已实现（OpenDesktop 扩展，非 OpenCLI 表内） |
 
 **Agent `action` 别名（旧客户端兼容）**

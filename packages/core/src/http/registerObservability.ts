@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { appendAudit } from "../audit.js";
 import {
+  bringTargetPageToFront,
   captureTargetScreenshot,
   clickOnTarget,
   closeTarget,
@@ -8,6 +9,7 @@ import {
   evaluateOnTarget,
   getNetworkCookiesForTarget,
   getTargetDocumentOuterHtml,
+  getTargetWindowState,
   keysOnTarget,
   navigateBackOnTarget,
   openTargetUrl,
@@ -494,6 +496,34 @@ export function registerObservabilityRoutes(v1: Router, deps: ObsDeps): void {
         if ("error" in r) {
           await audit(false, { reason: r.error });
           return jsonError(res, 502, "CLOSE_FAILED", r.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({ ok: true });
+      }
+      if (canonical === "window-state") {
+        if (!body.targetId) {
+          await audit(false, { reason: "missing_targetId" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId required for ${actionRaw}`);
+        }
+        const st = await getTargetWindowState(ctx.cdpPort, body.targetId, {
+          includePageMetrics: ctx.allowScriptExecution,
+        });
+        if ("error" in st) {
+          await audit(false, { reason: st.error });
+          return jsonError(res, 502, "WINDOW_STATE_FAILED", st.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json(st);
+      }
+      if (canonical === "focus-window") {
+        if (!body.targetId) {
+          await audit(false, { reason: "missing_targetId" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId required for ${actionRaw}`);
+        }
+        const r = await bringTargetPageToFront(ctx.cdpPort, body.targetId);
+        if ("error" in r) {
+          await audit(false, { reason: r.error });
+          return jsonError(res, 502, "FOCUS_WINDOW_FAILED", r.error);
         }
         await audit(true, { targetId: body.targetId });
         return res.json({ ok: true });

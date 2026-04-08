@@ -639,3 +639,77 @@ export async function closeTarget(
     return { ok: true as const };
   });
 }
+
+/** Browser.getWindowForTarget 归一化结果 */
+export type TargetWindowStatePayload = {
+  bounds: { left: number; top: number; width: number; height: number };
+  /** Chromium：`normal` | `minimized` | `maximized` | `fullscreen` */
+  windowState?: string;
+  pageVisibility?: string;
+  pageHasFocus?: boolean;
+  /** 未开启脚本权限时说明为何缺少页面级字段 */
+  pageMetricsNote?: string;
+};
+
+/**
+ * 查询 target 所在宿主窗口的几何与状态；可选附带 `document.visibilityState` / `document.hasFocus()`（需 `includePageMetrics`）。
+ */
+export async function getTargetWindowState(
+  cdpPort: number,
+  targetId: string,
+  opts?: { includePageMetrics?: boolean },
+): Promise<TargetWindowStatePayload | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const win = (await cdp.send("Browser.getWindowForTarget", { targetId })) as {
+      bounds?: { left: number; top: number; width: number; height: number; windowState?: string };
+      windowState?: string;
+    };
+    const b = win.bounds ?? { left: 0, top: 0, width: 0, height: 0 };
+    const bounds = {
+      left: b.left ?? 0,
+      top: b.top ?? 0,
+      width: b.width ?? 0,
+      height: b.height ?? 0,
+    };
+    const windowState = win.windowState ?? b.windowState;
+    const out: TargetWindowStatePayload = {
+      bounds,
+      windowState,
+    };
+    if (opts?.includePageMetrics) {
+      const sessionId = await attachToTargetSession(cdp, targetId);
+      await cdp.send("Runtime.enable", {}, sessionId);
+      const ev = (await cdp.send(
+        "Runtime.evaluate",
+        {
+          expression:
+            "({ visibility: typeof document !== 'undefined' ? document.visibilityState : 'n/a', hasFocus: typeof document !== 'undefined' ? document.hasFocus() : false })",
+          returnByValue: true,
+        },
+        sessionId,
+      )) as { result?: { value?: { visibility?: string; hasFocus?: boolean } } };
+      const v = ev.result?.value;
+      if (v) {
+        out.pageVisibility = v.visibility;
+        out.pageHasFocus = v.hasFocus;
+      }
+    } else {
+      out.pageMetricsNote =
+        "未请求页面级可见性/焦点（会话未开启 allowScriptExecution 时仅返回 Browser 窗口域）。";
+    }
+    return out;
+  });
+}
+
+/** CDP Page.bringToFront：将页面提到前台（Electron/Chromium 下通常等价于激活窗口栈）。 */
+export async function bringTargetPageToFront(
+  cdpPort: number,
+  targetId: string,
+): Promise<{ ok: true } | { error: string }> {
+  return withBrowserCdp(cdpPort, async (cdp) => {
+    const sessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Page.enable", {}, sessionId);
+    await cdp.send("Page.bringToFront", {}, sessionId);
+    return { ok: true as const };
+  });
+}
