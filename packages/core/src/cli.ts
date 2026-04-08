@@ -30,6 +30,14 @@ async function readTokenFromOpts(cmd: Command): Promise<string> {
   return (await readFile(config.tokenFile, "utf8")).trim();
 }
 
+async function readStdinUtf8(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const c of process.stdin) {
+    chunks.push(c as Buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 async function apiFetch(cmd: Command, method: string, apiPath: string, body?: unknown): Promise<Response> {
   const opts = rootOpts(cmd);
   const base = (opts.apiUrl ?? process.env.OPENDESKTOP_API_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
@@ -285,6 +293,38 @@ async function main() {
     .command("stop <id>")
     .action(async (id: string) => {
       const res = await apiFetch(program, "POST", `/v1/sessions/${id}/stop`);
+      const text = await res.text();
+      console.log(text);
+      if (!res.ok) process.exit(exitCodeForHttpStatus(res.status));
+    });
+
+  const agentCmd = program.command("agent").description("Agent：`POST /v1/agent/sessions/:id/actions`");
+
+  agentCmd
+    .command("action <sessionId>")
+    .description("传入 JSON body（--json 或 stdin），打印响应 JSON")
+    .option("--json <body>", "请求体 JSON 字符串；省略则从 stdin 读取")
+    .action(async (sessionId: string, opts: { json?: string }) => {
+      let raw: string;
+      if (opts.json !== undefined) {
+        raw = opts.json;
+      } else {
+        raw = await readStdinUtf8();
+        if (!raw.trim()) {
+          console.error("请使用 --json '<JSON>' 或通过 stdin 传入请求体");
+          process.exit(2);
+          return;
+        }
+      }
+      let body: unknown;
+      try {
+        body = JSON.parse(raw) as unknown;
+      } catch (e) {
+        console.error("JSON 解析失败:", e instanceof Error ? e.message : e);
+        process.exit(2);
+        return;
+      }
+      const res = await apiFetch(program, "POST", `/v1/agent/sessions/${sessionId}/actions`, body);
       const text = await res.text();
       console.log(text);
       if (!res.ok) process.exit(exitCodeForHttpStatus(res.status));

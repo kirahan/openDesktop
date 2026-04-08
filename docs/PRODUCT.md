@@ -19,7 +19,7 @@
 | **Session 状态机** | 会话状态至少覆盖：`pending` / `starting` / `running` / `killed` / `failed`（或语义等价集合）；`**killed`** 表示用户停止或子进程退出/断线，会话记录仍保留在列表直至 Core 重启；新会话 **始终新 UUID**。 |
 | **子进程与调试**      | 按 App/Profile 拉起目标进程；支持为调试 **注入远程调试相关参数**（具体策略由设计固定）；**捕获 stdout/stderr** 并与会话关联（含时间戳等可观测信息）。                                                  |
 | **CLI ↔ API**   | 创建/列出/停止会话、列出 App/Profile、Core 状态等 **核心操作** CLI 与 API **语义等价**；**不依赖 Studio** 也能完成全流程。                                                         |
-| **CLI（App 优先）** | 支持 **`od <appId> list-window|metrics|snapshot`**（`topology` 为兼容别名）；默认按应用解析最新活跃会话；`--session`、`--format`、`od doctor` 与约定退出码。 |
+| **CLI（App 优先）** | 支持 `**od list-window                                                                                                                           |
 
 
 ---
@@ -97,7 +97,7 @@
 ### 6.1 已实现扩展（工程交付，非主规格全文）
 
 - **窗口列表 / 指标 / 日志导出**：`GET /v1/sessions/:id/list-window|metrics`（`/topology` 为兼容别名），`GET .../logs/export`。
-- **Agent 面**：`GET /v1/agent/sessions/:id/snapshot`，`POST .../actions`（含截图、eval 等，受 Profile `allowScriptExecution` 与限流约束）。
+- **Agent 面**：`GET /v1/agent/sessions/:id/snapshot`，`POST .../actions`（含截图、`eval`、`renderer-globals` 全局枚举等，受 Profile `allowScriptExecution` 与限流约束）；CLI 与 `list-window` 同为 App-first：`yarn oc <appId> list-global --target <targetId>`（不写 session id 时自动选该应用下活跃会话）。
 - **版本能力位**：`GET /v1/version` 含 `capabilities`。
 - **配置**：`OPENDESKTOP_AGENT_API`、`OPENDESKTOP_EXTENDED_LOGS`、`OPENDESKTOP_AGENT_RPM`。
 

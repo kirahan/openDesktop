@@ -36,6 +36,7 @@ describe("createApp HTTP", () => {
     expect(v.body.agentActions).toContain("topology");
     expect(v.body.agentActions).toContain("dom");
     expect(v.body.agentActions).toContain("console-messages");
+    expect(v.body.agentActions).toContain("renderer-globals");
   });
 
   it("GET /v1/apps requires Bearer token", async () => {

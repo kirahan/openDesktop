@@ -563,6 +563,11 @@ function PageTargetScreenshot({
   const [winLoading, setWinLoading] = useState(false);
   const [focusLoading, setFocusLoading] = useState(false);
 
+  const [globalsLoading, setGlobalsLoading] = useState(false);
+  const [globalsErr, setGlobalsErr] = useState<string | null>(null);
+  const [globalsText, setGlobalsText] = useState<string | null>(null);
+  const [interestPattern, setInterestPattern] = useState("");
+
   const tokenOk = ctx.token.trim().length > 0;
 
   const gatewayRoot = cdpGatewayHttpUrl(ctx.apiRoot, ctx.sessionId);
@@ -715,6 +720,24 @@ function PageTargetScreenshot({
     }
   }, [postAgent, tokenOk, refreshWindowState]);
 
+  const runRendererGlobals = useCallback(async () => {
+    if (!tokenOk) return;
+    setGlobalsLoading(true);
+    setGlobalsErr(null);
+    try {
+      const payload: Record<string, unknown> = { action: "renderer-globals" };
+      const t = interestPattern.trim();
+      if (t.length > 0) payload.interestPattern = t;
+      const j = await postAgent(payload);
+      setGlobalsText(JSON.stringify(j, null, 2));
+    } catch (e) {
+      setGlobalsErr(e instanceof Error ? e.message : String(e));
+      setGlobalsText(null);
+    } finally {
+      setGlobalsLoading(false);
+    }
+  }, [postAgent, tokenOk, interestPattern]);
+
   useEffect(() => {
     if (!enabled || !tokenOk) return;
     void refreshWindowState();
@@ -734,7 +757,7 @@ function PageTargetScreenshot({
           color: OBS_PALETTE.textMuted,
         }}
       >
-        填写 Bearer token 后可使用截图、DOM 与控制台采样。
+        填写 Bearer token 后可使用截图、DOM、控制台采样与全局快照（renderer-globals）。
       </div>
     );
   }
@@ -779,6 +802,46 @@ function PageTargetScreenshot({
           {conLabel}
         </button>
       </div>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 8,
+        }}
+      >
+        <input
+          type="text"
+          value={interestPattern}
+          onChange={(e) => setInterestPattern(e.target.value)}
+          placeholder="可选：interest 正则（如 ^acquire|shell）"
+          aria-label="renderer-globals interest 正则"
+          style={{
+            minWidth: 200,
+            flex: "1 1 200px",
+            maxWidth: 440,
+            padding: "6px 10px",
+            fontSize: 11,
+            borderRadius: 8,
+            border: `1px solid ${OBS_PALETTE.border}`,
+            background: "#fff",
+            color: "#0f172a",
+          }}
+        />
+        <button
+          type="button"
+          disabled={globalsLoading}
+          onClick={() => void runRendererGlobals()}
+          style={pageInspectorBtnStyle(globalsLoading)}
+        >
+          {globalsLoading ? "枚举中…" : globalsText ? "刷新全局快照" : "全局快照"}
+        </button>
+      </div>
+      <p style={{ margin: "0 0 10px", fontSize: 10, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
+        通过 CDP 反射枚举当前 page 的 <code style={{ fontSize: 10 }}>globalThis</code> 属性（需 Profile
+        允许脚本执行）。结果较大时仅作探测用途。
+      </p>
       <div
         style={{
           marginBottom: 10,
@@ -1033,6 +1096,47 @@ function PageTargetScreenshot({
           }}
         >
           控制台：{conErr}
+        </div>
+      )}
+      {globalsText !== null && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 11, color: OBS_PALETTE.textMuted, marginBottom: 6 }}>
+            renderer-globals 响应（JSON）
+          </div>
+          <pre
+            style={{
+              margin: 0,
+              maxHeight: 320,
+              overflow: "auto",
+              padding: 12,
+              borderRadius: 8,
+              fontSize: 10,
+              lineHeight: 1.45,
+              background: "#f1f5f9",
+              border: `1px solid ${OBS_PALETTE.border}`,
+              color: "#0f172a",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+            }}
+          >
+            {globalsText}
+          </pre>
+        </div>
+      )}
+      {globalsErr && (
+        <div
+          style={{
+            marginBottom: 10,
+            padding: 10,
+            borderRadius: 8,
+            background: "#fef2f2",
+            fontSize: 11,
+            color: "#991b1b",
+            lineHeight: 1.45,
+          }}
+        >
+          全局快照：{globalsErr}
         </div>
       )}
     </div>

@@ -19,6 +19,10 @@ import {
   waitOnTarget,
 } from "../cdp/browserClient.js";
 import {
+  collectRendererGlobalSnapshotOnTarget,
+  parseInterestPattern,
+} from "../cdp/rendererGlobalSnapshot.js";
+import {
   isLegacyAgentActionAlias,
   isSupportedAgentCanonical,
   normalizeAgentAction,
@@ -152,6 +156,10 @@ export function registerObservabilityRoutes(v1: Router, deps: ObsDeps): void {
       deltaY?: number;
       ms?: number;
       timeoutMs?: number;
+      /** renderer-globals：可选，正则字符串 */
+      interestPattern?: string;
+      /** renderer-globals：最大属性条数 */
+      maxKeys?: number;
     };
     const actionRaw = typeof body.action === "string" ? body.action.trim() : "";
     if (!actionRaw) return jsonError(res, 400, "VALIDATION_ERROR", "action required");
@@ -527,6 +535,31 @@ export function registerObservabilityRoutes(v1: Router, deps: ObsDeps): void {
         }
         await audit(true, { targetId: body.targetId });
         return res.json({ ok: true });
+      }
+      if (canonical === "renderer-globals") {
+        if (!ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        if (!body.targetId) {
+          await audit(false, { reason: "missing_targetId" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId required for ${actionRaw}`);
+        }
+        const ip = parseInterestPattern(body.interestPattern);
+        if (!ip.ok) {
+          await audit(false, { reason: ip.message });
+          return jsonError(res, 400, "VALIDATION_ERROR", ip.message);
+        }
+        const snap = await collectRendererGlobalSnapshotOnTarget(ctx.cdpPort, body.targetId, {
+          interestPattern: ip.pattern,
+          maxKeys: body.maxKeys,
+        });
+        if ("error" in snap) {
+          await audit(false, { reason: snap.error });
+          return jsonError(res, 502, "RENDERER_GLOBALS_FAILED", snap.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json(snap.snapshot);
       }
       return jsonError(res, 500, "INTERNAL_ERROR", `Unhandled agent action: ${canonical}`);
     } catch (e) {

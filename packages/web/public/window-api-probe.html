@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Window / Shell API 探测</title>
+    <style>
+      :root {
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        line-height: 1.45;
+      }
+      body {
+        margin: 0 auto;
+        max-width: 960px;
+        padding: 1rem 1.25rem 3rem;
+        color: #111;
+        background: #fafafa;
+      }
+      h1 {
+        font-size: 1.25rem;
+        margin: 0 0 0.5rem;
+      }
+      p.hint {
+        margin: 0 0 1rem;
+        color: #444;
+        font-size: 0.9rem;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+      }
+      button {
+        padding: 0.45rem 0.75rem;
+        font-size: 0.9rem;
+        cursor: pointer;
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        background: #fff;
+      }
+      button:hover {
+        background: #f0f0f0;
+      }
+      section {
+        margin-top: 1.25rem;
+      }
+      section h2 {
+        font-size: 1rem;
+        margin: 0 0 0.5rem;
+      }
+      pre,
+      #log {
+        margin: 0;
+        padding: 0.75rem 1rem;
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        overflow: auto;
+        font-size: 0.8rem;
+        max-height: 42vh;
+      }
+      #log {
+        max-height: 28vh;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .tag {
+        display: inline-block;
+        padding: 0.1rem 0.35rem;
+        margin: 0.1rem;
+        border-radius: 4px;
+        background: #e8f4ff;
+        font-size: 0.75rem;
+      }
+      .warn {
+        color: #a60;
+        font-size: 0.85rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.8rem;
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 0.35rem 0.5rem;
+        border-bottom: 1px solid #eee;
+        vertical-align: top;
+      }
+      th {
+        background: #f3f3f3;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Window / Shell API 探测</h1>
+    <p class="hint">
+      用于在 <strong>koa-pc 等业务窗口</strong>（含 preload）或任意环境里查看
+      <code>globalThis</code> 上挂了哪些额外属性；也可安全尝试
+      <code>acquireShellApi</code>（若存在且仍可调）。
+    </p>
+    <p class="hint warn">
+      说明：在普通浏览器打开本页只能看到标准 API；要验证壳子暴露项，请在 Electron
+      窗口内打开（本地文件 URL 或 HTTP 均可，取决于该窗口是否带同一套 preload）。
+    </p>
+
+    <div class="row">
+      <button type="button" id="btn-scan">重新扫描</button>
+      <button type="button" id="btn-acquire">尝试 acquireShellApi()</button>
+      <button type="button" id="btn-copy">复制 JSON 摘要</button>
+    </div>
+
+    <section>
+      <h2>候选关键字（正则高亮）</h2>
+      <div id="candidates"></div>
+    </section>
+
+    <section>
+      <h2>摘要表（名称 → typeof）</h2>
+      <div id="table-wrap"></div>
+    </section>
+
+    <section>
+      <h2>acquireShellApi 试探日志</h2>
+      <div id="log"></div>
+    </section>
+
+    <section>
+      <h2>完整名列表（换行）</h2>
+      <pre id="full-list"></pre>
+    </section>
+
+    <script>
+      (function () {
+        const INTEREST_RE =
+          /^(acquire|shell|electron|ipc|koa|woa|ksxz|ELECTRON|preload|node)/i;
+
+        /** @type {string[]} */
+        function collectGlobalNames() {
+          const seen = new Set();
+          const out = [];
+          let obj = globalThis;
+          while (obj && obj !== Object.prototype) {
+            try {
+              for (const k of Object.getOwnPropertyNames(obj)) {
+                if (!seen.has(k)) {
+                  seen.add(k);
+                  out.push(k);
+                }
+              }
+            } catch (_) {
+              /* ignore */
+            }
+            obj = Object.getPrototypeOf(obj);
+          }
+          out.sort(function (a, b) {
+            return a.localeCompare(b);
+          });
+          return out;
+        }
+
+        function describeValue(key) {
+          try {
+            const v = globalThis[key];
+            const t = typeof v;
+            if (t === "function") {
+              let name = "";
+              try {
+                name = v.name || "";
+              } catch (_) {}
+              return { type: "function", detail: name };
+            }
+            if (v === null) return { type: "null", detail: "" };
+            if (v === void 0) return { type: "undefined", detail: "" };
+            return { type: t, detail: "" };
+          } catch (e) {
+            return { type: "error", detail: String(e) };
+          }
+        }
+
+        function scan() {
+          const names = collectGlobalNames();
+          const interesting = names.filter(function (n) {
+            return INTEREST_RE.test(n);
+          });
+
+          document.getElementById("candidates").innerHTML = interesting.length
+            ? interesting
+                .map(function (n) {
+                  return '<span class="tag">' + escapeHtml(n) + "</span>";
+                })
+                .join(" ")
+            : '<span class="warn">未匹配到候选名（环境可能是纯浏览器）。</span>';
+
+          const rows = names.map(function (n) {
+            const d = describeValue(n);
+            return (
+              "<tr><td>" +
+              escapeHtml(n) +
+              "</td><td>" +
+              escapeHtml(d.type) +
+              "</td><td>" +
+              escapeHtml(d.detail) +
+              "</td></tr>"
+            );
+          });
+          document.getElementById("table-wrap").innerHTML =
+            "<table><thead><tr><th>name</th><th>typeof</th><th>note</th></tr></thead><tbody>" +
+            rows.join("") +
+            "</tbody></table>";
+
+          document.getElementById("full-list").textContent = names.join("\n");
+
+          window.__probeLast = {
+            at: new Date().toISOString(),
+            href: String(location.href),
+            names: names,
+            interesting: interesting,
+          };
+        }
+
+        function escapeHtml(s) {
+          return String(s)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        }
+
+        function logLine(msg) {
+          const el = document.getElementById("log");
+          el.textContent += msg + "\n";
+        }
+
+        function tryAcquire() {
+          const el = document.getElementById("log");
+          el.textContent = "";
+
+          logLine("[" + new Date().toISOString() + "] 开始试探 acquireShellApi");
+
+          if (typeof globalThis.acquireShellApi !== "function") {
+            logLine("typeof acquireShellApi !== 'function' → 当前 window 上不可用（或已被摘掉）。");
+            return;
+          }
+
+          try {
+            const api = globalThis.acquireShellApi();
+            logLine("acquireShellApi() 返回: " + (api === undefined ? "undefined" : typeof api));
+
+            if (api && typeof api === "object") {
+              const keys = Object.keys(api);
+              logLine("返回对象 own keys (" + keys.length + "): " + keys.join(", "));
+              if (api.api && typeof api.api === "object") {
+                logLine("api.api keys: " + Object.keys(api.api).join(", "));
+              }
+            }
+          } catch (e) {
+            logLine("调用抛错: " + (e && e.message ? e.message : String(e)));
+          }
+        }
+
+        function copySummary() {
+          const p = window.__probeLast;
+          if (!p) {
+            alert("请先点「重新扫描」");
+            return;
+          }
+          const text = JSON.stringify(p, null, 2);
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(
+              function () {
+                alert("已复制 JSON 摘要");
+              },
+              function () {
+                prompt("复制下面内容：", text);
+              }
+            );
+          } else {
+            prompt("复制下面内容：", text);
+          }
+        }
+
+        document.getElementById("btn-scan").addEventListener("click", scan);
+        document.getElementById("btn-acquire").addEventListener("click", tryAcquire);
+        document.getElementById("btn-copy").addEventListener("click", copySummary);
+
+        scan();
+      })();
+    </script>
+  </body>
+</html>

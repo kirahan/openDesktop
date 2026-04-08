@@ -123,7 +123,7 @@ yarn od -- doctor --app demo-mock
 - Core **默认只监听 127.0.0.1**，请勿在未配置防火墙时绑定 `0.0.0.0`。
 - `/v1/sessions/:id/cdp/`* 为调试流量，**不强制 Bearer**，以便 DevTools / CDP 客户端；依赖 **仅本机回环** 与上游会话隔离。
 - **CDP 等效高权限**：可执行页面脚本与访问调试协议，勿向公网暴露。
-- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close` 等）需 Profile `**allowScriptExecution: true**`；只读类（如 `state`、`get`、`screenshot`、`network`、`console-messages`、`window-state`）以及仅 `ms`、不含 `selector` 的 `wait`、以及窗口前置 `focus-window` 不需要。
+- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close`、`renderer-globals` 等）需 Profile `**allowScriptExecution: true**`；只读类（如 `state`、`get`、`screenshot`、`network`、`console-messages`、`window-state`）以及仅 `ms`、不含 `selector` 的 `wait`、以及窗口前置 `focus-window` 不需要。
 
 ## 语义层与可观测 API（Bearer）
 
@@ -163,6 +163,7 @@ yarn od -- doctor --app demo-mock
 | `close` | `Target.closeTarget` 关闭调试目标 | `targetId` | 已实现（需脚本） |
 | `window-state` | 宿主窗口尺寸/位置、`windowState`；若 Profile 允许脚本则附带 `document.visibilityState` 与 `document.hasFocus` | `targetId` | 已实现（扩展） |
 | `focus-window` | `Page.bringToFront`，尝试激活该 target 所在窗口 | `targetId` | 已实现（扩展） |
+| `renderer-globals` | CDP `Runtime.evaluate` 反射枚举 `globalThis` 属性（`typeof`、可选 interest 正则匹配名）；**非**跨进程持有 live `window` | `targetId`，可选 `interestPattern`、`maxKeys`（默认条数上限见 Core） | 已实现（需脚本） |
 | `console-messages` | 短时采样控制台 | `targetId`, 可选 `waitMs` | 已实现（OpenDesktop 扩展，非 OpenCLI 表内） |
 
 **Agent `action` 别名（旧客户端兼容）**
@@ -171,6 +172,11 @@ yarn od -- doctor --app demo-mock
 |-------------|------------------|------|
 | `topology`  | `state`          | 与 `GET /v1/sessions/:id/list-window` 同源的快照 JSON（旧名 topology） |
 | `dom`       | `get`            | 目标页 `outerHTML`（整页 HTML，可能截断） |
+
+**CLI（Core 包 `od` / `yarn oc`）**：
+
+- **App-first（不写 session id，按应用解析活跃会话）**：`yarn oc <appId> list-window` / `snapshot` / `metrics`。`<appId>` **须与 Core 注册的应用 id 一致**（`yarn oc app list`），例如 `xiezuo-dev`；勿与本地 yarn 脚本名或简称混用。枚举全局：`yarn oc <appId> list-global`；**未传 `--target`** 时对 **list-window 拓扑中的第一个 target** 做枚举，传入则使用指定 `targetId`。可选 `--interest <pattern>`、`--max-keys <n>`（等同 Agent `renderer-globals`，需 `allowScriptExecution`）。可选 `--session <uuid>` 指定会话。
+- **通用 Agent**：`agent action <sessionId> --json '<JSON>'` 调用 `POST /v1/agent/sessions/:id/actions`；不传 `--json` 时从 **stdin** 读入整段 JSON（便于管道传入）。
 
 **环境变量**：`OPENDESKTOP_AGENT_API=0` 关闭 `/v1/agent/`*；`OPENDESKTOP_EXTENDED_LOGS=0` 时 SSE 仅下发 `ts/stream/line`；`OPENDESKTOP_AGENT_RPM` 控制 Agent 每分钟请求上限（默认 120）。
 

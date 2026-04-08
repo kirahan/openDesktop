@@ -6,6 +6,8 @@ export const RESERVED_TOP_LEVEL = new Set([
   "session",
   "open",
   "doctor",
+  "cdp",
+  "agent",
   "-h",
   "--help",
   "-V",
@@ -13,9 +15,20 @@ export const RESERVED_TOP_LEVEL = new Set([
 ]);
 
 /** 推荐 `list-window`；`topology` 为兼容别名 */
-export const APP_FIRST_COMMANDS = new Set(["snapshot", "list-window", "topology", "metrics"]);
+export const APP_FIRST_COMMANDS = new Set([
+  "snapshot",
+  "list-window",
+  "topology",
+  "metrics",
+  "list-global",
+]);
 
-export type AppFirstSubcommand = "snapshot" | "list-window" | "metrics" | "topology";
+export type AppFirstSubcommand =
+  | "snapshot"
+  | "list-window"
+  | "metrics"
+  | "topology"
+  | "list-global";
 
 export interface AppFirstParseOk {
   kind: "ok";
@@ -25,6 +38,10 @@ export interface AppFirstParseOk {
   sessionId?: string;
   appId: string;
   command: AppFirstSubcommand;
+  /** list-global：可省略，运行时从 list-window 拓扑自动解析唯一 page target */
+  targetId?: string;
+  interestPattern?: string;
+  maxKeys?: number;
 }
 
 export interface AppFirstParseErr {
@@ -36,7 +53,7 @@ export interface AppFirstParseErr {
 export type AppFirstParseResult = AppFirstParseOk | AppFirstParseErr | { kind: "not-app-first" };
 
 /**
- * 自 process.argv.slice(2) 解析 App-first：`od [flags] <appId> <snapshot|list-window|metrics>`（`topology` 为别名）
+ * 自 process.argv.slice(2) 解析 App-first：`od [flags] <appId> <snapshot|list-window|metrics|list-global>`（`topology` 为别名）
  */
 export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
   const opts: {
@@ -44,6 +61,9 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
     tokenFile?: string;
     format?: "table" | "json";
     sessionId?: string;
+    targetId?: string;
+    interestPattern?: string;
+    maxKeys?: number;
   } = {};
   const pos: string[] = [];
   let i = 0;
@@ -81,6 +101,31 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
       i += 2;
       continue;
     }
+    if (a === "--target") {
+      const v = argv[i + 1];
+      if (!v) return { kind: "error", message: "--target 需要参数", exitCode: EX_USAGE };
+      opts.targetId = v;
+      i += 2;
+      continue;
+    }
+    if (a === "--interest") {
+      const v = argv[i + 1];
+      if (!v) return { kind: "error", message: "--interest 需要参数", exitCode: EX_USAGE };
+      opts.interestPattern = v;
+      i += 2;
+      continue;
+    }
+    if (a === "--max-keys") {
+      const v = argv[i + 1];
+      if (!v) return { kind: "error", message: "--max-keys 需要参数", exitCode: EX_USAGE };
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 1) {
+        return { kind: "error", message: "--max-keys 须为正数", exitCode: EX_USAGE };
+      }
+      opts.maxKeys = Math.floor(n);
+      i += 2;
+      continue;
+    }
     if (a.startsWith("-")) {
       return { kind: "not-app-first" };
     }
@@ -107,5 +152,8 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
     sessionId: opts.sessionId,
     appId,
     command: cmd as AppFirstSubcommand,
+    targetId: opts.targetId?.trim(),
+    interestPattern: opts.interestPattern,
+    maxKeys: opts.maxKeys,
   };
 }

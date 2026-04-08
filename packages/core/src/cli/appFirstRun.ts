@@ -5,6 +5,7 @@ import { exitCodeForFetchError, exitCodeForHttpStatus } from "./mapHttpToExit.js
 import type { AppFirstParseOk } from "./parseAppFirstArgv.js";
 import { printStructured } from "./output.js";
 import { pickLatestActiveSessionForApp, type ProfileRow, type SessionRow } from "./sessionResolve.js";
+import type { TopologyNode } from "../topology/types.js";
 
 async function readJson(res: Response): Promise<unknown> {
   const t = await res.text();
@@ -13,6 +14,16 @@ async function readJson(res: Response): Promise<unknown> {
   } catch {
     return { raw: t };
   }
+}
+
+/**
+ * 未传 --target 时：使用 list-window 拓扑中的 **第一个** target（与 CDP `/json/list` 顺序一致）。
+ */
+export function pickListGlobalTargetId(nodes: TopologyNode[]): { targetId: string } | { error: string } {
+  if (nodes.length === 0) {
+    return { error: "list-window 无可用 target（子进程 CDP 未就绪或无调试目标）" };
+  }
+  return { targetId: nodes[0]!.targetId };
 }
 
 async function resolveSessionId(
@@ -62,6 +73,19 @@ async function resolveSessionId(
   const pdata = (await readJson(pRes)) as { profiles?: ProfileRow[] };
   const sessions = sdata.sessions ?? [];
   const profiles = pdata.profiles ?? [];
+  const profilesForApp = profiles.filter((p) => p.appId === parsed.appId);
+  if (profilesForApp.length === 0) {
+    const knownAppIds = [...new Set(profiles.map((p) => p.appId))].sort();
+    const hint =
+      knownAppIds.length > 0
+        ? `Core 已注册的 appId：${knownAppIds.join(", ")}。第一个参数须与注册的应用 id 完全一致（开发脚本名如 xiezuo-dev 未必等于 app id）。可用 yarn oc app list 查看。`
+        : "当前无任何 Profile；请先 yarn oc app create 注册应用并创建会话。";
+    return {
+      ok: false,
+      exit: EX_NOINPUT,
+      stderr: `未找到 appId「${parsed.appId}」对应的 Profile。${hint}`,
+    };
+  }
   const picked = pickLatestActiveSessionForApp(sessions, profiles, parsed.appId);
   if (!picked) {
     return {
@@ -99,14 +123,56 @@ export async function runAppFirst(
     return exitCodeForFetchError(e);
   }
 
-  const path =
-    parsed.command === "snapshot"
-      ? `/v1/agent/sessions/${sessionId}/snapshot`
-      : parsed.command === "metrics"
-        ? `/v1/sessions/${sessionId}/metrics`
-        : `/v1/sessions/${sessionId}/list-window`;
-
   try {
+    if (parsed.command === "list-global") {
+      let targetId = parsed.targetId?.trim() ?? "";
+      if (!targetId) {
+        const topoRes = await fetchWithBearer(httpCtx, "GET", `/v1/sessions/${sessionId}/list-window`);
+        if (!topoRes.ok) {
+          const errText = await topoRes.text();
+          writeErr(`拉取 list-window 失败 HTTP ${topoRes.status}: ${errText}`);
+          return exitCodeForHttpStatus(topoRes.status);
+        }
+        const topo = (await readJson(topoRes)) as { nodes?: TopologyNode[] };
+        const nodes = Array.isArray(topo.nodes) ? topo.nodes : [];
+        const picked = pickListGlobalTargetId(nodes);
+        if ("error" in picked) {
+          writeErr(picked.error);
+          return EX_USAGE;
+        }
+        targetId = picked.targetId;
+      }
+
+      const body: Record<string, unknown> = {
+        action: "renderer-globals",
+        targetId,
+      };
+      const ip = parsed.interestPattern?.trim();
+      if (ip) body.interestPattern = ip;
+      if (parsed.maxKeys !== undefined) body.maxKeys = parsed.maxKeys;
+      const res = await fetchWithBearer(
+        httpCtx,
+        "POST",
+        `/v1/agent/sessions/${sessionId}/actions`,
+        body,
+      );
+      if (!res.ok) {
+        const errText = await res.text();
+        writeErr(`HTTP ${res.status}: ${errText}`);
+        return exitCodeForHttpStatus(res.status);
+      }
+      const data = await readJson(res);
+      printStructured(data, parsed.format, writeOut);
+      return 0;
+    }
+
+    const path =
+      parsed.command === "snapshot"
+        ? `/v1/agent/sessions/${sessionId}/snapshot`
+        : parsed.command === "metrics"
+          ? `/v1/sessions/${sessionId}/metrics`
+          : `/v1/sessions/${sessionId}/list-window`;
+
     const res = await fetchWithBearer(httpCtx, "GET", path);
     if (!res.ok) {
       const errText = await res.text();

@@ -51,4 +51,30 @@ describe("tryParseAppFirstArgv", () => {
     const r = tryParseAppFirstArgv(["my-app", "snapshot", "extra"]);
     expect(r.kind).toBe("error");
   });
+
+  it("list-global without --target is ok (run time resolves from list-window)", () => {
+    const r = tryParseAppFirstArgv(["my-app", "list-global"]);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") expect(r.command).toBe("list-global");
+  });
+
+  it("parses list-global with --target and optional flags", () => {
+    const r = tryParseAppFirstArgv([
+      "my-app",
+      "list-global",
+      "--target",
+      "tid-1",
+      "--interest",
+      "^a",
+      "--max-keys",
+      "100",
+    ]);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.command).toBe("list-global");
+      expect(r.targetId).toBe("tid-1");
+      expect(r.interestPattern).toBe("^a");
+      expect(r.maxKeys).toBe(100);
+    }
+  });
 });
