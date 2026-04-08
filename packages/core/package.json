@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "cli": "node --import tsx src/cli.ts",
-    "dev": "node --import tsx src/cli.ts",
+    "dev": "tsx watch src/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc -p tsconfig.json --noEmit && eslint ."
