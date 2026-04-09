@@ -18,6 +18,7 @@ import {
   typeOnTarget,
   waitOnTarget,
 } from "../cdp/browserClient.js";
+import { extractButtonCandidatesFromHtml } from "../cdp/domExplore.js";
 import {
   collectRendererGlobalSnapshotOnTarget,
   parseInterestPattern,
@@ -160,6 +161,12 @@ export function registerObservabilityRoutes(v1: Router, deps: ObsDeps): void {
       interestPattern?: string;
       /** renderer-globals：最大属性条数 */
       maxKeys?: number;
+      /** explore：最多返回条数，默认 32，上限 128 */
+      maxCandidates?: number;
+      /** explore：最低 score（0～1），默认 0 */
+      minScore?: number;
+      /** explore：是否纳入类按钮 `<a href>`（启发式） */
+      includeAnchorButtons?: boolean;
     };
     const actionRaw = typeof body.action === "string" ? body.action.trim() : "";
     if (!actionRaw) return jsonError(res, 400, "VALIDATION_ERROR", "action required");
@@ -224,6 +231,35 @@ export function registerObservabilityRoutes(v1: Router, deps: ObsDeps): void {
         }
         await audit(true, { targetId: body.targetId });
         return res.json({ html: dom.html, truncated: dom.truncated });
+      }
+      if (canonical === "explore") {
+        if (!body.targetId) {
+          await audit(false, { reason: "missing_targetId" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId required for ${actionRaw}`);
+        }
+        const maxCandidatesRaw = body.maxCandidates;
+        const maxCandidates =
+          typeof maxCandidatesRaw === "number" && Number.isFinite(maxCandidatesRaw)
+            ? Math.min(128, Math.max(1, Math.floor(maxCandidatesRaw)))
+            : 32;
+        const minScoreRaw = body.minScore;
+        const minScore =
+          typeof minScoreRaw === "number" && Number.isFinite(minScoreRaw)
+            ? Math.min(1, Math.max(0, minScoreRaw))
+            : 0;
+        const includeAnchorButtons = Boolean(body.includeAnchorButtons);
+        const dom = await getTargetDocumentOuterHtml(ctx.cdpPort, body.targetId);
+        if ("error" in dom) {
+          await audit(false, { reason: dom.error });
+          return jsonError(res, 502, "DOM_FAILED", dom.error);
+        }
+        const { candidates } = extractButtonCandidatesFromHtml(dom.html, {
+          maxCandidates,
+          minScore,
+          includeAnchorButtons,
+        });
+        await audit(true, { targetId: body.targetId });
+        return res.json({ candidates, htmlTruncated: dom.truncated });
       }
       if (canonical === "eval") {
         if (!ctx.allowScriptExecution) {

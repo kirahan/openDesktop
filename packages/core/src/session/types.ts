@@ -11,7 +11,7 @@ export interface SessionRecord {
   pid?: number;
   error?: string;
   createdAt: string;
-  /** 是否允许 Agent/CDP 语义层执行 Runtime.evaluate（默认 false，由 Profile 继承） */
+  /** 是否允许 Agent/CDP 语义层执行脚本类动作（默认 true：新建 Profile 未指定时；由 Profile 继承） */
   allowScriptExecution?: boolean;
 }
 

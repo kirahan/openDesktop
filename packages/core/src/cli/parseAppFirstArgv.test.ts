@@ -26,6 +26,31 @@ describe("tryParseAppFirstArgv", () => {
     }
   });
 
+  it("parses list-window", () => {
+    const r = tryParseAppFirstArgv(["my-app", "list-window"]);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") expect(r.command).toBe("list-window");
+  });
+
+  it("parses explore with optional flags", () => {
+    const r = tryParseAppFirstArgv([
+      "--max-candidates",
+      "16",
+      "--min-score",
+      "0.5",
+      "--include-anchor-buttons",
+      "my-app",
+      "explore",
+    ]);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.command).toBe("explore");
+      expect(r.maxCandidates).toBe(16);
+      expect(r.minScore).toBe(0.5);
+      expect(r.includeAnchorButtons).toBe(true);
+    }
+  });
+
   it("parses flags before positionals", () => {
     const r = tryParseAppFirstArgv(["--format", "json", "my-app", "metrics"]);
     expect(r.kind).toBe("ok");
@@ -43,8 +68,14 @@ describe("tryParseAppFirstArgv", () => {
     }
   });
 
-  it("rejects unknown subcommand", () => {
-    expect(tryParseAppFirstArgv(["my-app", "nope"]).kind).toBe("not-app-first");
+  it("rejects unknown subcommand with explicit error (app-first shape)", () => {
+    const r = tryParseAppFirstArgv(["my-app", "nope"]);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") {
+      expect(r.message).toContain("未知 App-first 子命令");
+      expect(r.message).toContain("nope");
+      expect(r.message).toContain("explore");
+    }
   });
 
   it("rejects extra positionals", () => {

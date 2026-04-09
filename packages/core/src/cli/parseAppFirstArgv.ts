@@ -21,6 +21,7 @@ export const APP_FIRST_COMMANDS = new Set([
   "topology",
   "metrics",
   "list-global",
+  "explore",
 ]);
 
 export type AppFirstSubcommand =
@@ -28,7 +29,8 @@ export type AppFirstSubcommand =
   | "list-window"
   | "metrics"
   | "topology"
-  | "list-global";
+  | "list-global"
+  | "explore";
 
 export interface AppFirstParseOk {
   kind: "ok";
@@ -38,10 +40,16 @@ export interface AppFirstParseOk {
   sessionId?: string;
   appId: string;
   command: AppFirstSubcommand;
-  /** list-global：可省略，运行时从 list-window 拓扑自动解析唯一 page target */
+  /** list-global / explore：可省略，运行时从 list-window 拓扑取第一个 page target */
   targetId?: string;
   interestPattern?: string;
   maxKeys?: number;
+  /** explore：最多返回候选条数 */
+  maxCandidates?: number;
+  /** explore：最低 score（0～1） */
+  minScore?: number;
+  /** explore：纳入类按钮 `<a href>`（启发式） */
+  includeAnchorButtons?: boolean;
 }
 
 export interface AppFirstParseErr {
@@ -53,7 +61,7 @@ export interface AppFirstParseErr {
 export type AppFirstParseResult = AppFirstParseOk | AppFirstParseErr | { kind: "not-app-first" };
 
 /**
- * 自 process.argv.slice(2) 解析 App-first：`od [flags] <appId> <snapshot|list-window|metrics|list-global>`（`topology` 为别名）
+ * 自 process.argv.slice(2) 解析 App-first：`od [flags] <appId> <snapshot|list-window|metrics|list-global|explore>`（`topology` 为别名）
  */
 export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
   const opts: {
@@ -64,6 +72,9 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
     targetId?: string;
     interestPattern?: string;
     maxKeys?: number;
+    maxCandidates?: number;
+    minScore?: number;
+    includeAnchorButtons?: boolean;
   } = {};
   const pos: string[] = [];
   let i = 0;
@@ -126,6 +137,33 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
       i += 2;
       continue;
     }
+    if (a === "--max-candidates") {
+      const v = argv[i + 1];
+      if (!v) return { kind: "error", message: "--max-candidates 需要参数", exitCode: EX_USAGE };
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 1) {
+        return { kind: "error", message: "--max-candidates 须为 1～128 的正整数", exitCode: EX_USAGE };
+      }
+      opts.maxCandidates = Math.min(128, Math.max(1, Math.floor(n)));
+      i += 2;
+      continue;
+    }
+    if (a === "--min-score") {
+      const v = argv[i + 1];
+      if (!v) return { kind: "error", message: "--min-score 需要参数", exitCode: EX_USAGE };
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0 || n > 1) {
+        return { kind: "error", message: "--min-score 须为 0～1", exitCode: EX_USAGE };
+      }
+      opts.minScore = n;
+      i += 2;
+      continue;
+    }
+    if (a === "--include-anchor-buttons") {
+      opts.includeAnchorButtons = true;
+      i += 1;
+      continue;
+    }
     if (a.startsWith("-")) {
       return { kind: "not-app-first" };
     }
@@ -142,7 +180,14 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
   if (rest.length > 0) {
     return { kind: "error", message: `多余参数: ${rest.join(" ")}`, exitCode: EX_USAGE };
   }
-  if (!APP_FIRST_COMMANDS.has(cmd)) return { kind: "not-app-first" };
+  if (!APP_FIRST_COMMANDS.has(cmd)) {
+    return {
+      kind: "error",
+      message:
+        `未知 App-first 子命令「${cmd}」。可用: list-window | metrics | snapshot | list-global | explore（topology 与 list-window 等价）`,
+      exitCode: EX_USAGE,
+    };
+  }
 
   return {
     kind: "ok",
@@ -155,5 +200,8 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
     targetId: opts.targetId?.trim(),
     interestPattern: opts.interestPattern,
     maxKeys: opts.maxKeys,
+    maxCandidates: opts.maxCandidates,
+    minScore: opts.minScore,
+    includeAnchorButtons: opts.includeAnchorButtons,
   };
 }

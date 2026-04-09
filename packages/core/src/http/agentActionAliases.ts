@@ -33,6 +33,7 @@ export const SUPPORTED_AGENT_ACTIONS = [
   "window-state",
   "focus-window",
   "renderer-globals",
+  "explore",
 ] as const;
 
 /** 仍接受但已归一化的历史 `action` 名（见 {@link LEGACY_TO_CANONICAL}） */

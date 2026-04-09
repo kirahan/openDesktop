@@ -8,10 +8,11 @@ import { SessionManager } from "../session/manager.js";
 import { JsonFileStore } from "../store/jsonStore.js";
 import { createApp } from "./createApp.js";
 
-const { openMock, cookiesMock, globalsMock } = vi.hoisted(() => ({
+const { openMock, cookiesMock, globalsMock, getDomMock } = vi.hoisted(() => ({
   openMock: vi.fn(),
   cookiesMock: vi.fn(),
   globalsMock: vi.fn(),
+  getDomMock: vi.fn(),
 }));
 
 vi.mock("../cdp/browserClient.js", async (importOriginal) => {
@@ -21,6 +22,8 @@ vi.mock("../cdp/browserClient.js", async (importOriginal) => {
     openTargetUrl: (...args: unknown[]) => openMock(...args) as ReturnType<typeof mod.openTargetUrl>,
     getNetworkCookiesForTarget: (...args: unknown[]) =>
       cookiesMock(...args) as ReturnType<typeof mod.getNetworkCookiesForTarget>,
+    getTargetDocumentOuterHtml: (...args: unknown[]) =>
+      getDomMock(...args) as ReturnType<typeof mod.getTargetDocumentOuterHtml>,
   };
 });
 
@@ -42,8 +45,13 @@ describe("POST /v1/agent/.../actions open & network (mocked CDP)", () => {
     openMock.mockReset();
     cookiesMock.mockReset();
     globalsMock.mockReset();
+    getDomMock.mockReset();
     openMock.mockResolvedValue({ ok: true });
     cookiesMock.mockResolvedValue({ cookies: [{ name: "sid", value: "1" }] });
+    getDomMock.mockResolvedValue({
+      html: '<!DOCTYPE html><html><body><button id="go">Go</button></body></html>',
+      truncated: false,
+    });
     globalsMock.mockResolvedValue({
       snapshot: {
         collectedAt: "t",
@@ -166,6 +174,54 @@ describe("POST /v1/agent/.../actions open & network (mocked CDP)", () => {
 
     expect(res.status).toBe(403);
     expect(globalsMock).not.toHaveBeenCalled();
+  });
+
+  it("explore returns candidates from HTML (same path as get)", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-ag-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "tok", store, manager });
+    vi.spyOn(manager, "getOpsContext").mockReturnValue({
+      state: "running",
+      cdpPort: 9123,
+      pid: 99,
+      allowScriptExecution: false,
+    });
+
+    const res = await request(app)
+      .post("/v1/agent/sessions/any/actions")
+      .set("Authorization", "Bearer tok")
+      .send({ action: "explore", targetId: "tid", maxCandidates: 10 });
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.candidates)).toBe(true);
+    expect(res.body.candidates.some((c: { label?: string }) => c.label === "Go")).toBe(true);
+    expect(res.body.htmlTruncated).toBe(false);
+    expect(getDomMock).toHaveBeenCalledWith(9123, "tid");
+  });
+
+  it("explore returns DOM_FAILED when getTargetDocumentOuterHtml fails", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-ag-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "tok", store, manager });
+    vi.spyOn(manager, "getOpsContext").mockReturnValue({
+      state: "running",
+      cdpPort: 9123,
+      pid: 99,
+      allowScriptExecution: false,
+    });
+    getDomMock.mockResolvedValueOnce({ error: "cdp down" });
+
+    const res = await request(app)
+      .post("/v1/agent/sessions/any/actions")
+      .set("Authorization", "Bearer tok")
+      .send({ action: "explore", targetId: "tid" });
+
+    expect(res.status).toBe(502);
+    expect(res.body.error.code).toBe("DOM_FAILED");
   });
 
   it("renderer-globals returns 400 for invalid interestPattern without calling CDP", async () => {

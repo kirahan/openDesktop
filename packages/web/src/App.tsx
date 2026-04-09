@@ -982,6 +982,9 @@ function PageTargetScreenshot({
   const [globalsLoading, setGlobalsLoading] = useState(false);
   const [globalsErr, setGlobalsErr] = useState<string | null>(null);
   const [globalsText, setGlobalsText] = useState<string | null>(null);
+  const [exploreLoading, setExploreLoading] = useState(false);
+  const [exploreErr, setExploreErr] = useState<string | null>(null);
+  const [exploreText, setExploreText] = useState<string | null>(null);
   const [interestPattern, setInterestPattern] = useState("");
 
   const tokenOk = ctx.token.trim().length > 0;
@@ -1155,6 +1158,21 @@ function PageTargetScreenshot({
     }
   }, [postAgent, tokenOk, interestPattern]);
 
+  const runExplore = useCallback(async () => {
+    if (!tokenOk) return;
+    setExploreLoading(true);
+    setExploreErr(null);
+    try {
+      const j = await postAgent({ action: "explore" });
+      setExploreText(JSON.stringify(j, null, 2));
+    } catch (e) {
+      setExploreErr(e instanceof Error ? e.message : String(e));
+      setExploreText(null);
+    } finally {
+      setExploreLoading(false);
+    }
+  }, [postAgent, tokenOk]);
+
   useEffect(() => {
     if (!enabled || !tokenOk) return;
     void refreshWindowState();
@@ -1174,7 +1192,7 @@ function PageTargetScreenshot({
           color: OBS_PALETTE.textMuted,
         }}
       >
-        填写 Bearer token 后可使用截图、DOM、控制台采样与全局快照（renderer-globals）。
+        填写 Bearer token 后可使用截图、DOM、控制台采样、全局快照（renderer-globals）与探索（explore）。
       </div>
     );
   }
@@ -1217,6 +1235,15 @@ function PageTargetScreenshot({
           style={pageInspectorBtnStyle(conLoading)}
         >
           {conLabel}
+        </button>
+        <button
+          type="button"
+          disabled={exploreLoading}
+          onClick={() => void runExplore()}
+          style={pageInspectorBtnStyle(exploreLoading)}
+          title="Agent explore：解析当前页 DOM，返回按钮类候选（selector 可配合点击）"
+        >
+          {exploreLoading ? "探索中…" : exploreText ? "刷新探索" : "探索"}
         </button>
       </div>
       <div
@@ -1540,6 +1567,47 @@ function PageTargetScreenshot({
           }}
         >
           控制台：{conErr}
+        </div>
+      )}
+      {exploreText !== null && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 11, color: OBS_PALETTE.textMuted, marginBottom: 6 }}>
+            explore 响应（候选按钮 JSON，与 get 同源 HTML）
+          </div>
+          <pre
+            style={{
+              margin: 0,
+              maxHeight: 280,
+              overflow: "auto",
+              padding: 12,
+              borderRadius: 8,
+              fontSize: 10,
+              lineHeight: 1.45,
+              background: "#f0fdf4",
+              border: `1px solid ${OBS_PALETTE.border}`,
+              color: "#0f172a",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+            }}
+          >
+            {exploreText}
+          </pre>
+        </div>
+      )}
+      {exploreErr && (
+        <div
+          style={{
+            marginBottom: 10,
+            padding: 10,
+            borderRadius: 8,
+            background: "#fef2f2",
+            fontSize: 11,
+            color: "#991b1b",
+            lineHeight: 1.45,
+          }}
+        >
+          探索：{exploreErr}
         </div>
       )}
       {globalsText !== null && (

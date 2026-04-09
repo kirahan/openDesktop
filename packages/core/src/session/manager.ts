@@ -55,7 +55,7 @@ export class SessionManager {
       profileId,
       state: "pending",
       createdAt,
-      allowScriptExecution: profile.allowScriptExecution ?? false,
+      allowScriptExecution: profile.allowScriptExecution ?? true,
       logs: [],
       logSubscribers: new Set(),
     };
@@ -199,7 +199,7 @@ export class SessionManager {
       state: s.state,
       cdpPort: s.cdpPort,
       pid: s.pid,
-      allowScriptExecution: s.allowScriptExecution ?? false,
+      allowScriptExecution: s.allowScriptExecution ?? true,
     };
   }
 }

@@ -162,7 +162,7 @@ export function createApp(deps: AppDeps): CreateAppResult {
       name: body.name ?? body.id,
       env: body.env ?? {},
       extraArgs: body.extraArgs ?? [],
-      allowScriptExecution: body.allowScriptExecution ?? false,
+      allowScriptExecution: body.allowScriptExecution ?? true,
     };
     data.profiles.push(prof);
     await store.writeProfiles(data.profiles);

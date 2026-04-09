@@ -82,9 +82,21 @@ async function main() {
   const program = new Command();
   program
     .name("od")
-    .description("OpenDesktop CLI — local Electron debug session control plane")
+    .description(
+      "OpenDesktop CLI — local Electron debug session control plane。App-first：yarn oc <appId> <子命令>（见下方说明）。",
+    )
     .option("--api-url <url>", "Core HTTP base URL", process.env.OPENDESKTOP_API_URL)
-    .option("--token-file <path>", "Token file path", process.env.OPENDESKTOP_TOKEN_FILE);
+    .option("--token-file <path>", "Token file path", process.env.OPENDESKTOP_TOKEN_FILE)
+    .addHelpText(
+      "after",
+      `
+App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
+  yarn oc <appId> list-window | metrics | snapshot | list-global | explore
+  yarn oc <appId> topology          # 与 list-window 等价
+  可选: --format json|--session <uuid>|--target|--interest|--max-keys（list-global）
+        explore: --max-candidates|--min-score|--include-anchor-buttons
+全局安装的入口名为 od，与 yarn oc 指向同一 CLI。`,
+    );
 
   const core = program.command("core").description("Control the Core daemon");
 

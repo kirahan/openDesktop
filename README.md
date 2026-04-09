@@ -123,7 +123,7 @@ yarn od -- doctor --app demo-mock
 - Core **默认只监听 127.0.0.1**，请勿在未配置防火墙时绑定 `0.0.0.0`。
 - `/v1/sessions/:id/cdp/`* 为调试流量，**不强制 Bearer**，以便 DevTools / CDP 客户端；依赖 **仅本机回环** 与上游会话隔离。
 - **CDP 等效高权限**：可执行页面脚本与访问调试协议，勿向公网暴露。
-- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close`、`renderer-globals` 等）需 Profile `**allowScriptExecution: true**`；只读类（如 `state`、`get`、`screenshot`、`network`、`console-messages`、`window-state`）以及仅 `ms`、不含 `selector` 的 `wait`、以及窗口前置 `focus-window` 不需要。
+- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close`、`renderer-globals` 等）需会话侧 **`allowScriptExecution: true`**（**`POST /v1/profiles` 新建 Profile 时默认 `true`**；旧数据或未迁移会话仍可能为 `false`，可显式传 `allowScriptExecution: false` 关闭）。只读类（如 `state`、`get`、`explore`、`screenshot`、`network`、`console-messages`、`window-state`）以及仅 `ms`、不含 `selector` 的 `wait`、以及窗口前置 `focus-window` 不需要。
 
 ## 语义层与可观测 API（Bearer）
 
@@ -154,6 +154,7 @@ yarn od -- doctor --app demo-mock
 | `keys` | 派发按键（`key` 为常用名或单字符） | `targetId`, `key` | 已实现（需脚本） |
 | `wait` | 延时 `ms` 和/或等待 `selector` 出现 | `targetId`, `ms` / `selector`, 可选 `timeoutMs` | 已实现（含 `selector` 时需脚本） |
 | `get` | 整页 `outerHTML`（可能截断） | `targetId` | 已实现 |
+| `explore` | 与 `get` **同源**拉取 HTML，在 Core 内**只读解析**（cheerio），返回按钮类候选列表（`label`、`selector`、`score`、`reasons`）；`selector` 与 `click` 一致；可选 `maxCandidates`（默认 32）、`minScore`（0～1）、`includeAnchorButtons` | `targetId` | 已实现（纯只读，不需 `allowScriptExecution`） |
 | `screenshot` | PNG Base64 | `targetId` | 已实现 |
 | `scroll` | `selector` 滚入视窗，或 `deltaX`/`deltaY` | `targetId`, 可选 `selector` / `deltaX` / `deltaY` | 已实现（需脚本） |
 | `back` | 历史后退并等待加载 | `targetId` | 已实现（需脚本） |
@@ -178,7 +179,11 @@ Studio 中「实时控制台」使用 **`GET .../console/stream`**（`fetch` + S
 
 **CLI（Core 包 `od` / `yarn oc`）**：
 
-- **App-first（不写 session id，按应用解析活跃会话）**：`yarn oc <appId> list-window` / `snapshot` / `metrics`。`<appId>` **须与 Core 注册的应用 id 一致**（`yarn oc app list`），例如 `xiezuo-dev`；勿与本地 yarn 脚本名或简称混用。枚举全局：`yarn oc <appId> list-global`；**未传 `--target`** 时对 **list-window 拓扑中的第一个 target** 做枚举，传入则使用指定 `targetId`。可选 `--interest <pattern>`、`--max-keys <n>`（等同 Agent `renderer-globals`，需 `allowScriptExecution`）。可选 `--session <uuid>` 指定会话。
+- **App-first（不写 session id，按应用解析活跃会话）**：形式为 **`yarn oc <appId> <子命令>`**（workspace 脚本；**全局安装**时入口名为 **`od`**，语义相同）。`<appId>` **须与 Core 注册的应用 id 一致**（`yarn oc app list`），例如 `demo-mock` 或 `xiezuo-dev`；勿与本地 yarn 脚本名或简称混用。
+  - **子命令**：`list-window`（CDP 目标列表快照）、`metrics`、`snapshot`（Agent 快照）、`list-global`（`renderer-globals` / 全局枚举）、**`explore`**（`action: explore`，解析 DOM 返回按钮候选）。**`topology`** 与 **`list-window` 等价**（兼容旧名）。
+  - **list-global**：**未传 `--target`** 时使用 list-window 拓扑中的**第一个** target；传入 `--target <targetId>` 则指定目标。可选 `--interest <pattern>`、`--max-keys <n>`（等同 Agent `renderer-globals`，需 `allowScriptExecution`）。可选 `--session <uuid>` 固定会话。
+  - **explore**：同上，未传 `--target` 时对拓扑中**第一个** page target 做 `explore`。可选 `--max-candidates <n>`、`--min-score <0~1>`、`--include-anchor-buttons`（与 Agent `explore` 一致，**不需** `allowScriptExecution`）。
+  - **其它全局选项**：`--format table|json` 等见 `od --help` 文末说明。
 - **通用 Agent**：`agent action <sessionId> --json '<JSON>'` 调用 `POST /v1/agent/sessions/:id/actions`；不传 `--json` 时从 **stdin** 读入整段 JSON（便于管道传入）。
 
 **环境变量**：`OPENDESKTOP_AGENT_API=0` 关闭 `/v1/agent/`*；`OPENDESKTOP_EXTENDED_LOGS=0` 时 SSE 仅下发 `ts/stream/line`；`OPENDESKTOP_AGENT_RPM` 控制 Agent 每分钟请求上限（默认 120）。

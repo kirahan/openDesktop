@@ -166,6 +166,43 @@ export async function runAppFirst(
       return 0;
     }
 
+    if (parsed.command === "explore") {
+      let targetId = parsed.targetId?.trim() ?? "";
+      if (!targetId) {
+        const topoRes = await fetchWithBearer(httpCtx, "GET", `/v1/sessions/${sessionId}/list-window`);
+        if (!topoRes.ok) {
+          const errText = await topoRes.text();
+          writeErr(`拉取 list-window 失败 HTTP ${topoRes.status}: ${errText}`);
+          return exitCodeForHttpStatus(topoRes.status);
+        }
+        const topo = (await readJson(topoRes)) as { nodes?: TopologyNode[] };
+        const nodes = Array.isArray(topo.nodes) ? topo.nodes : [];
+        const picked = pickListGlobalTargetId(nodes);
+        if ("error" in picked) {
+          writeErr(picked.error);
+          return EX_USAGE;
+        }
+        targetId = picked.targetId;
+      }
+
+      const body: Record<string, unknown> = {
+        action: "explore",
+        targetId,
+      };
+      if (parsed.maxCandidates !== undefined) body.maxCandidates = parsed.maxCandidates;
+      if (parsed.minScore !== undefined) body.minScore = parsed.minScore;
+      if (parsed.includeAnchorButtons) body.includeAnchorButtons = true;
+      const res = await fetchWithBearer(httpCtx, "POST", `/v1/agent/sessions/${sessionId}/actions`, body);
+      if (!res.ok) {
+        const errText = await res.text();
+        writeErr(`HTTP ${res.status}: ${errText}`);
+        return exitCodeForHttpStatus(res.status);
+      }
+      const data = await readJson(res);
+      printStructured(data, parsed.format, writeOut);
+      return 0;
+    }
+
     const path =
       parsed.command === "snapshot"
         ? `/v1/agent/sessions/${sessionId}/snapshot`
