@@ -35,6 +35,7 @@ import type { LogLine } from "../session/types.js";
 import { collectTopologySnapshot } from "../topology/fetchTopology.js";
 import { agentRateLimitMiddleware } from "./rateLimit.js";
 import { buildOodaSnapshot } from "./snapshotBuilder.js";
+import { registerAgentRecipeRoutes } from "./registerRecipeRoutes.js";
 
 function jsonError(res: Response, status: number, code: string, message: string) {
   res.status(status).json({ error: { code, message } });
@@ -128,6 +129,8 @@ export function registerObservabilityRoutes(v1: Router, deps: ObsDeps): void {
 
   const agent = Router();
   agent.use(agentRateLimitMiddleware(config.agentRateLimitPerMinute, dataDir));
+
+  registerAgentRecipeRoutes(agent, { config, manager, dataDir });
 
   agent.get("/sessions/:sessionId/snapshot", async (req, res) => {
     const sessionId = req.params.sessionId;

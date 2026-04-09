@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
 
@@ -18,5 +19,10 @@ describe("loadConfig", () => {
   it("defaults host to loopback", () => {
     const c = loadConfig({ dataDir: "/x" });
     expect(c.host).toBe("127.0.0.1");
+  });
+
+  it("defaults recipesDir under dataDir", () => {
+    const c = loadConfig({ dataDir: "/custom/data" });
+    expect(c.recipesDir).toBe(path.join("/custom/data", "recipes"));
   });
 });

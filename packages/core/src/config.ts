@@ -5,6 +5,8 @@ export interface CoreConfig {
   host: string;
   port: number;
   dataDir: string;
+  /** 操作配方 JSON 根目录（默认 `<dataDir>/recipes`） */
+  recipesDir: string;
   tokenFile: string;
   logLevel: "debug" | "info" | "warn" | "error";
   /** Absolute path to web SPA static files (optional) */
@@ -43,6 +45,11 @@ export function loadConfig(overrides: Partial<CoreConfig> = {}): CoreConfig {
     (process.env.OPENDESKTOP_LOG_LEVEL as CoreConfig["logLevel"]) ??
     "info") as CoreConfig["logLevel"];
   const webDist = overrides.webDist ?? process.env.OPENDESKTOP_WEB_DIST;
+  const recipesDir = path.resolve(
+    overrides.recipesDir ??
+      process.env.OPENDESKTOP_RECIPES_DIR ??
+      path.join(dataDir, "recipes"),
+  );
 
   const agentEnv = process.env.OPENDESKTOP_AGENT_API?.trim().toLowerCase();
   const enableAgentApi =
@@ -57,6 +64,7 @@ export function loadConfig(overrides: Partial<CoreConfig> = {}): CoreConfig {
     host,
     port: Number.isFinite(port) ? port : 8787,
     dataDir: path.resolve(dataDir),
+    recipesDir,
     tokenFile: path.resolve(tokenFile),
     logLevel: ["debug", "info", "warn", "error"].includes(logLevel) ? logLevel : "info",
     webDist: webDist ? path.resolve(webDist) : undefined,

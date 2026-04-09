@@ -19,6 +19,13 @@ export type DomExploreOptions = {
   minScore?: number;
   /** 默认 false：是否纳入类按钮 `<a href>`（启发式） */
   includeAnchorButtons?: boolean;
+  /** 默认 false：是否纳入 `[role="tab"]`（用于 Tab 导航等场景） */
+  includeRoleTabs?: boolean;
+  /**
+   * 默认 false：是否纳入常见 Tab 文案节点（如 `.tab-label`、`.tab-item-name`）。
+   * 部分 Electron/Web 应用顶部 Tab 为普通 div/span，无 `role="tab"`。
+   */
+  includeTabSurfaceHints?: boolean;
 };
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -107,6 +114,15 @@ function scoreFor($: cheerio.CheerioAPI, el: Element, label: string, reasons: st
     s += 0.05;
     reasons.push("role:button");
   }
+  if ($(el).attr("role") === "tab") {
+    s += 0.08;
+    reasons.push("role:tab");
+  }
+  const cls = ($(el).attr("class") ?? "").toLowerCase();
+  if (/\btab-label\b/.test(cls) || /\btab-item-name\b/.test(cls)) {
+    s += 0.06;
+    reasons.push("class:tab-surface");
+  }
   return clamp(Number(s.toFixed(3)), 0, 1);
 }
 
@@ -128,6 +144,8 @@ export function extractButtonCandidatesFromHtml(
   const maxCandidates = clamp(Math.floor(opts.maxCandidates ?? 32), 1, 128);
   const minScore = clamp(opts.minScore ?? 0, 0, 1);
   const includeAnchorButtons = opts.includeAnchorButtons ?? false;
+  const includeRoleTabs = opts.includeRoleTabs ?? false;
+  const includeTabSurfaceHints = opts.includeTabSurfaceHints ?? false;
 
   const $ = cheerio.load(html);
   const seen = new WeakSet<Element>();
@@ -158,6 +176,24 @@ export function extractButtonCandidatesFromHtml(
       if (seen.has(e)) return;
       if (isExcluded($, e)) return;
       if (!anchorLooksLikeButton($, e)) return;
+      consider(e);
+    });
+  }
+
+  if (includeRoleTabs) {
+    $("[role=\"tab\"]").each((_, el) => {
+      const e = el as Element;
+      if (seen.has(e)) return;
+      if (isExcluded($, e)) return;
+      consider(e);
+    });
+  }
+
+  if (includeTabSurfaceHints) {
+    $(".tab-label, .tab-item-name").each((_, el) => {
+      const e = el as Element;
+      if (seen.has(e)) return;
+      if (isExcluded($, e)) return;
       consider(e);
     });
   }

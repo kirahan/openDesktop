@@ -138,9 +138,14 @@ yarn od -- doctor --app demo-mock
 | `GET /v1/sessions/:id/logs/export?format=jsonl&level=error` | 服务端过滤后导出（`format=txt` 亦可）                                                                                                |
 | `GET /v1/agent/sessions/:id/snapshot`                       | OODA 结构化快照（拓扑摘要、错误计数、指标等）                                                                                                |
 | `POST /v1/agent/sessions/:id/actions`                       | JSON：`action` 使用与 **OpenCLI `operate`** 同一套动词标识（见下表）。`GET /v1/version` 的 `agentActions` 列出当前接受的 canonical 名与历史别名。 |
+| `GET /v1/agent/sessions/:id/recipes?app=<slug>`              | 列出已保存的操作配方（`app` 可选，仅扫描该应用子目录） |
+| `GET /v1/agent/sessions/:id/recipes/:appSlug/:recipeId`      | 读取单份配方 JSON（`recipeId` 不含 `.json` 后缀） |
+| `POST /v1/agent/sessions/:id/recipes/:appSlug/:recipeId/run` | 执行配方：`{ "targetId": "...", "verifiedBuild": "可选" }`。需 **`allowScriptExecution: true`**（与 `click` 相同）。成功后**原子写回**更新后的 `selector` / `updatedAt`（及可选 `verifiedBuild`） |
 
 
 `GET /v1/version` 的 `capabilities` 数组可用来探测是否启用 Agent 等。
+
+**操作配方目录**：默认 `<数据目录>/recipes/`，可按应用分子目录存放，例如 `recipes/<appSlug>/<recipeId>.json`。覆盖目录：`OPENDESKTOP_RECIPES_DIR`。配方 `schemaVersion: 1`，步骤目前仅支持 `action: "click"`；若首次 `click` 失败，可在步骤上配置 `match`（如 `labelContains`）以触发 **DOM 探索兜底**（与 `explore` 同源解析），唯一匹配后重试并写回新 `selector`。
 
 **Agent 动词表（与 OpenCLI README 对齐，含实现状态）**
 
@@ -186,7 +191,7 @@ Studio 中「实时控制台」使用 **`GET .../console/stream`**（`fetch` + S
   - **其它全局选项**：`--format table|json` 等见 `od --help` 文末说明。
 - **通用 Agent**：`agent action <sessionId> --json '<JSON>'` 调用 `POST /v1/agent/sessions/:id/actions`；不传 `--json` 时从 **stdin** 读入整段 JSON（便于管道传入）。
 
-**环境变量**：`OPENDESKTOP_AGENT_API=0` 关闭 `/v1/agent/`*；`OPENDESKTOP_EXTENDED_LOGS=0` 时 SSE 仅下发 `ts/stream/line`；`OPENDESKTOP_AGENT_RPM` 控制 Agent 每分钟请求上限（默认 120）。
+**环境变量**：`OPENDESKTOP_AGENT_API=0` 关闭 `/v1/agent/`*；`OPENDESKTOP_EXTENDED_LOGS=0` 时 SSE 仅下发 `ts/stream/line`；`OPENDESKTOP_AGENT_RPM` 控制 Agent 每分钟请求上限（默认 120）；`OPENDESKTOP_RECIPES_DIR` 覆盖操作配方根路径（默认 `<OPENDESKTOP_DATA_DIR>/recipes`）。
 
 ## Playwright `connectOverCDP`
 

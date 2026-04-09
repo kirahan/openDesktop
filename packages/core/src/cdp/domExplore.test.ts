@@ -57,6 +57,28 @@ describe("extractButtonCandidatesFromHtml", () => {
     expect(mid.candidates.every((c) => c.label === "ok")).toBe(true);
   });
 
+  it("optionally includes .tab-label when includeTabSurfaceHints", () => {
+    const html = `<html><body>
+      <span class="tab-label">文档</span>
+    </body></html>`;
+    expect(extractButtonCandidatesFromHtml(html).candidates.some((c) => c.label === "文档")).toBe(false);
+    expect(
+      extractButtonCandidatesFromHtml(html, { includeTabSurfaceHints: true }).candidates.some(
+        (c) => c.label === "文档",
+      ),
+    ).toBe(true);
+  });
+
+  it("optionally includes role=tab when includeRoleTabs", () => {
+    const html = `<html><body>
+      <div role="tab" id="doc-tab">文档</div>
+    </body></html>`;
+    expect(extractButtonCandidatesFromHtml(html).candidates.some((c) => c.label === "文档")).toBe(false);
+    expect(
+      extractButtonCandidatesFromHtml(html, { includeRoleTabs: true }).candidates.some((c) => c.label === "文档"),
+    ).toBe(true);
+  });
+
   it("optionally includes anchor buttons when includeAnchorButtons", () => {
     const html = `<html><body>
       <a href="/x" class="btn-primary">Go</a>
