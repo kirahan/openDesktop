@@ -1,9 +1,14 @@
 import WebSocket from "ws";
+import {
+  parseExceptionDetailsFromThrown,
+  type RuntimeStackFrame,
+} from "./runtimeExceptionStack.js";
 
 /** 与 OpenCLI CDP 发送超时的量级对齐；单条 CDP 命令默认上限。 */
 export const DEFAULT_CDP_TIMEOUT_MS = 30_000;
 
-async function getBrowserWsUrl(cdpPort: number): Promise<string | undefined> {
+/** 解析 browser CDP WebSocket URL（供流式观测等模块复用）。 */
+export async function getBrowserWsUrl(cdpPort: number): Promise<string | undefined> {
   const res = await fetch(`http://127.0.0.1:${cdpPort}/json/version`);
   if (!res.ok) return undefined;
   const v = (await res.json()) as { webSocketDebuggerUrl?: string };
@@ -192,7 +197,8 @@ export async function attachToTargetSession(
   return attach.sessionId;
 }
 
-async function withBrowserCdp<T>(
+/** 连接 browser CDP WebSocket，执行 `fn` 后关闭连接。 */
+export async function withBrowserCdp<T>(
   cdpPort: number,
   fn: (cdp: BrowserCdp) => Promise<T>,
 ): Promise<T | { error: string }> {
@@ -311,6 +317,70 @@ export type ConsoleEntryPreview = {
   argsPreview: string[];
   timestamp?: number;
 };
+
+export type { RuntimeStackFrame };
+
+/**
+ * 短时订阅 `Runtime.exceptionThrown`，返回窗口内**首条**未捕获异常的结构化栈（与 {@link collectConsoleMessagesForTarget} 相同的等待模型）。
+ */
+export async function collectRuntimeExceptionForTarget(
+  cdpPort: number,
+  targetId: string,
+  waitMs: number,
+): Promise<
+  | {
+      text: string;
+      textTruncated: boolean;
+      frames: RuntimeStackFrame[];
+      note: string;
+    }
+  | { error: string }
+> {
+  const wsUrl = await getBrowserWsUrl(cdpPort);
+  if (!wsUrl) return { error: "no_browser_ws" };
+
+  const ws = new WebSocket(wsUrl);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve());
+      ws.once("error", reject);
+    });
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+
+  const cdp = new BrowserCdp(ws);
+  let flatSessionId: string | undefined;
+  let captured:
+    | { text: string; textTruncated: boolean; frames: RuntimeStackFrame[] }
+    | undefined;
+
+  cdp.onProtocolEvent = (method, params, eventSessionId) => {
+    if (method !== "Runtime.exceptionThrown") return;
+    if (flatSessionId !== undefined && eventSessionId !== undefined && eventSessionId !== flatSessionId) {
+      return;
+    }
+    if (captured) return;
+    captured = parseExceptionDetailsFromThrown(params);
+  };
+
+  try {
+    flatSessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Runtime.enable", {}, flatSessionId);
+    const ms = Math.min(Math.max(waitMs, 100), 30_000);
+    await new Promise((r) => setTimeout(r, ms));
+
+    const base = captured ?? { text: "", textTruncated: false, frames: [] };
+    const note = captured
+      ? "仅包含监听窗口内首条 uncaught exception 的栈（CDP 投递顺序为准，无历史回溯）。"
+      : "等待窗口内未收到新的 uncaught exception；frames 为空表示该时段内无此类事件（不表示页面从未报错）。";
+    return { ...base, note };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    cdp.close();
+  }
+}
 
 /**
  * 在短时窗口内监听 Runtime.consoleAPICalled。CDP 无法回溯历史控制台消息，仅能收到连接建立之后产生的日志。

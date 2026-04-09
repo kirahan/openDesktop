@@ -4,6 +4,10 @@ import path from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetConsoleStreamCountForTest, tryAcquireConsoleStream } from "../cdp/consoleStreamLimiter.js";
+import {
+  resetObservabilitySseCountsForTest,
+  tryAcquireNetworkSseStream,
+} from "../cdp/observabilitySseLimiter.js";
 import { loadConfig } from "../config.js";
 import { createApp } from "./createApp.js";
 import { SessionManager } from "../session/manager.js";
@@ -40,6 +44,13 @@ describe("createApp HTTP", () => {
     expect(v.body.agentActions).toContain("console-messages");
     expect(v.body.agentActions).toContain("renderer-globals");
     expect(v.body.agentActions).toContain("explore");
+    expect(v.body.agentActions).toContain("network-observe");
+    expect(v.body.agentActions).toContain("runtime-exception");
+    expect(Array.isArray(v.body.sseObservabilityStreams)).toBe(true);
+    expect(v.body.sseObservabilityStreams).toContain("network");
+    expect(v.body.sseObservabilityStreams).toContain("runtime-exception");
+    expect(v.body.sseObservabilityStreamPaths?.network).toContain("/network/stream");
+    expect(v.body.sseObservabilityStreamPaths?.runtimeException).toContain("/runtime-exception/stream");
   });
 
   it("GET /v1/apps requires Bearer token", async () => {
@@ -153,6 +164,100 @@ describe("createApp HTTP", () => {
       .set("Authorization", "Bearer t");
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe("CDP_NOT_READY");
+    spy.mockRestore();
+  });
+
+  it("GET /v1/sessions/:id/network/stream returns 404 when session missing", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const res = await request(app)
+      .get("/v1/sessions/missing-id/network/stream?targetId=T1")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("SESSION_NOT_FOUND");
+  });
+
+  it("GET /v1/sessions/:id/network/stream requires targetId", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const res = await request(app)
+      .get("/v1/sessions/any/network/stream")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("GET /v1/sessions/:id/network/stream returns 503 when CDP not ready", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const spy = vi.spyOn(manager, "getOpsContext");
+    spy.mockReturnValue({
+      state: "running",
+      cdpPort: undefined,
+      pid: 1,
+      allowScriptExecution: false,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/network/stream?targetId=T1")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("CDP_NOT_READY");
+    spy.mockRestore();
+  });
+
+  it("GET /v1/sessions/:id/network/stream returns 429 when stream limit exceeded", async () => {
+    resetObservabilitySseCountsForTest();
+    for (let i = 0; i < 4; i++) {
+      expect(tryAcquireNetworkSseStream()).toBe(true);
+    }
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const spy = vi.spyOn(manager, "getOpsContext");
+    spy.mockReturnValue({
+      state: "running",
+      cdpPort: 9222,
+      pid: 1,
+      allowScriptExecution: false,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/network/stream?targetId=T1")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(429);
+    expect(res.body.error.code).toBe("NETWORK_SSE_STREAM_LIMIT");
+    spy.mockRestore();
+    resetObservabilitySseCountsForTest();
+  });
+
+  it("GET /v1/sessions/:id/runtime-exception/stream returns 403 when script execution disabled", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const spy = vi.spyOn(manager, "getOpsContext");
+    spy.mockReturnValue({
+      state: "running",
+      cdpPort: 9222,
+      pid: 1,
+      allowScriptExecution: false,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/runtime-exception/stream?targetId=T1")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe("SCRIPT_NOT_ALLOWED");
     spy.mockRestore();
   });
 

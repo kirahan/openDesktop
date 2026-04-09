@@ -12,6 +12,17 @@ import {
   releaseConsoleStream,
   tryAcquireConsoleStream,
 } from "../cdp/consoleStreamLimiter.js";
+import {
+  releaseNetworkSseStream,
+  releaseRuntimeExceptionSseStream,
+  tryAcquireNetworkSseStream,
+  tryAcquireRuntimeExceptionSseStream,
+} from "../cdp/observabilitySseLimiter.js";
+import { NETWORK_SSE_MAX_EVENTS_PER_SECOND, runNetworkObservationStream } from "../cdp/networkObserveStream.js";
+import {
+  MAX_RUNTIME_EXCEPTION_SSE_PER_MINUTE,
+  runRuntimeExceptionStream,
+} from "../cdp/runtimeExceptionStream.js";
 import { listAgentActionNamesForVersion } from "./agentActionAliases.js";
 import { registerObservabilityRoutes } from "./registerObservability.js";
 
@@ -104,6 +115,11 @@ export function createApp(deps: AppDeps): CreateAppResult {
       api: API_VERSION,
       core: PACKAGE_VERSION,
       capabilities,
+      sseObservabilityStreams: ["network", "runtime-exception"] as const,
+      sseObservabilityStreamPaths: {
+        network: "/v1/sessions/:sessionId/network/stream",
+        runtimeException: "/v1/sessions/:sessionId/runtime-exception/stream",
+      },
       ...(agentActions ? { agentActions: [...agentActions] } : {}),
     });
   });
@@ -203,6 +219,180 @@ export function createApp(deps: AppDeps): CreateAppResult {
     config,
     manager,
     dataDir: config.dataDir,
+  });
+
+  v1.get("/sessions/:sessionId/network/stream", async (req, res) => {
+    const q = req.query.targetId;
+    const targetId = typeof q === "string" ? q.trim() : "";
+    if (!targetId) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "targetId query parameter required");
+    }
+    const stripQueryRaw = req.query.stripQuery;
+    const stripQuery = stripQueryRaw === "false" || stripQueryRaw === "0" ? false : true;
+    let maxPerSec = NETWORK_SSE_MAX_EVENTS_PER_SECOND;
+    const mps = req.query.maxEventsPerSecond;
+    if (typeof mps === "string" && mps.trim()) {
+      const n = parseInt(mps, 10);
+      if (Number.isFinite(n)) maxPerSec = Math.min(200, Math.max(1, n));
+    }
+
+    const sessionId = req.params.sessionId;
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (ctx.state !== "running" || !ctx.cdpPort) {
+      return jsonError(res, 503, "CDP_NOT_READY", "Session has no active CDP endpoint");
+    }
+
+    if (!tryAcquireNetworkSseStream()) {
+      return jsonError(res, 429, "NETWORK_SSE_STREAM_LIMIT", "Too many concurrent network observation streams");
+    }
+
+    const ac = new AbortController();
+    const onClose = (): void => {
+      ac.abort();
+    };
+    req.on("close", onClose);
+
+    let droppedTotal = 0;
+    let lastWarnAt = 0;
+    const maybeWarnDropped = (code: string): void => {
+      if (res.writableEnded) return;
+      const t = Date.now();
+      if (t - lastWarnAt < 300) return;
+      lastWarnAt = t;
+      if (droppedTotal === 0) return;
+      res.write(
+        `event: warning\ndata: ${JSON.stringify({ code, droppedEvents: droppedTotal })}\n\n`,
+      );
+    };
+
+    try {
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+
+      const readyPayload = {
+        sessionId,
+        targetId,
+        stripQuery,
+        maxEventsPerSecond: maxPerSec,
+        note: "events are CDP Network request completions after subscribe; no history; rate limit may drop events (see warning)",
+      };
+      res.write(`event: ready\ndata: ${JSON.stringify(readyPayload)}\n\n`);
+
+      const result = await runNetworkObservationStream(
+        ctx.cdpPort,
+        targetId,
+        {
+          stripQuery,
+          maxEventsPerSecond: maxPerSec,
+          onRequestComplete: (ev) => {
+            if (res.writableEnded) return;
+            res.write(`data: ${JSON.stringify(ev)}\n\n`);
+          },
+          onDropped: (delta) => {
+            droppedTotal += delta;
+            maybeWarnDropped("NETWORK_SSE_RATE_LIMIT");
+          },
+        },
+        ac.signal,
+      );
+
+      if (result.error && !res.writableEnded) {
+        res.write(`event: error\ndata: ${JSON.stringify({ message: result.error })}\n\n`);
+      }
+      if (!res.writableEnded) res.end();
+    } finally {
+      req.removeListener("close", onClose);
+      releaseNetworkSseStream();
+    }
+  });
+
+  v1.get("/sessions/:sessionId/runtime-exception/stream", async (req, res) => {
+    const q = req.query.targetId;
+    const targetId = typeof q === "string" ? q.trim() : "";
+    if (!targetId) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "targetId query parameter required");
+    }
+
+    const sessionId = req.params.sessionId;
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (ctx.state !== "running" || !ctx.cdpPort) {
+      return jsonError(res, 503, "CDP_NOT_READY", "Session has no active CDP endpoint");
+    }
+    if (!ctx.allowScriptExecution) {
+      return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+    }
+
+    if (!tryAcquireRuntimeExceptionSseStream()) {
+      return jsonError(
+        res,
+        429,
+        "RUNTIME_EXCEPTION_SSE_STREAM_LIMIT",
+        "Too many concurrent runtime exception streams",
+      );
+    }
+
+    const ac = new AbortController();
+    const onClose = (): void => {
+      ac.abort();
+    };
+    req.on("close", onClose);
+
+    let droppedTotal = 0;
+    let lastWarnAt = 0;
+    const maybeWarnDropped = (): void => {
+      if (res.writableEnded) return;
+      const t = Date.now();
+      if (t - lastWarnAt < 300) return;
+      lastWarnAt = t;
+      if (droppedTotal === 0) return;
+      res.write(
+        `event: warning\ndata: ${JSON.stringify({ code: "RUNTIME_EXCEPTION_SSE_RATE_LIMIT", droppedEvents: droppedTotal })}\n\n`,
+      );
+    };
+
+    try {
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+
+      const readyPayload = {
+        sessionId,
+        targetId,
+        maxPerMinute: MAX_RUNTIME_EXCEPTION_SSE_PER_MINUTE,
+        note: "events are Runtime.exceptionThrown after subscribe; no history; per-minute cap may drop (see warning)",
+      };
+      res.write(`event: ready\ndata: ${JSON.stringify(readyPayload)}\n\n`);
+
+      const result = await runRuntimeExceptionStream(
+        ctx.cdpPort,
+        targetId,
+        {
+          maxPerMinute: MAX_RUNTIME_EXCEPTION_SSE_PER_MINUTE,
+          onException: (payload) => {
+            if (res.writableEnded) return;
+            res.write(`data: ${JSON.stringify(payload)}\n\n`);
+          },
+          onDropped: (delta) => {
+            droppedTotal += delta;
+            maybeWarnDropped();
+          },
+        },
+        ac.signal,
+      );
+
+      if (result.error && !res.writableEnded) {
+        res.write(`event: error\ndata: ${JSON.stringify({ message: result.error })}\n\n`);
+      }
+      if (!res.writableEnded) res.end();
+    } finally {
+      req.removeListener("close", onClose);
+      releaseRuntimeExceptionSseStream();
+    }
   });
 
   v1.get("/sessions/:sessionId/console/stream", async (req, res) => {

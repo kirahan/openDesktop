@@ -32,6 +32,53 @@ describe("tryParseAppFirstArgv", () => {
     if (r.kind === "ok") expect(r.command).toBe("list-window");
   });
 
+  it("parses network-observe with optional flags", () => {
+    const r = tryParseAppFirstArgv([
+      "--window-ms",
+      "5000",
+      "--slow-ms",
+      "800",
+      "--no-strip-query",
+      "my-app",
+      "network-observe",
+    ]);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.command).toBe("network-observe");
+      expect(r.windowMs).toBe(5000);
+      expect(r.slowThresholdMs).toBe(800);
+      expect(r.stripQuery).toBe(false);
+    }
+  });
+
+  it("parses network-stream with optional flags", () => {
+    const r = tryParseAppFirstArgv([
+      "--no-strip-query",
+      "--max-events-per-second",
+      "50",
+      "my-app",
+      "network-stream",
+    ]);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.command).toBe("network-stream");
+      expect(r.stripQuery).toBe(false);
+      expect(r.maxEventsPerSecond).toBe(50);
+    }
+  });
+
+  it("parses console-observe and stack-observe with --wait-ms", () => {
+    const c = tryParseAppFirstArgv(["--wait-ms", "1500", "my-app", "console-observe"]);
+    expect(c.kind).toBe("ok");
+    if (c.kind === "ok") {
+      expect(c.command).toBe("console-observe");
+      expect(c.waitMs).toBe(1500);
+    }
+    const s = tryParseAppFirstArgv(["my-app", "stack-observe"]);
+    expect(s.kind).toBe("ok");
+    if (s.kind === "ok") expect(s.command).toBe("stack-observe");
+  });
+
   it("parses explore with optional flags", () => {
     const r = tryParseAppFirstArgv([
       "--max-candidates",

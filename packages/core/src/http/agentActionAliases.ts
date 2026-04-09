@@ -10,7 +10,7 @@ const LEGACY_TO_CANONICAL: Record<string, string> = {
 };
 
 /**
- * 当前实现已支持的 canonical `action` 值（与 OpenCLI README 动词表对齐，另含 `console-messages`）。
+ * 当前实现已支持的 canonical `action` 值（与 OpenCLI README 动词表对齐，另含 `console-messages`、`runtime-exception` 等扩展）。
  */
 export const SUPPORTED_AGENT_ACTIONS = [
   "open",
@@ -26,6 +26,7 @@ export const SUPPORTED_AGENT_ACTIONS = [
   "back",
   "eval",
   "network",
+  "network-observe",
   "init",
   "verify",
   "close",
@@ -33,6 +34,7 @@ export const SUPPORTED_AGENT_ACTIONS = [
   "window-state",
   "focus-window",
   "renderer-globals",
+  "runtime-exception",
   "explore",
 ] as const;
 

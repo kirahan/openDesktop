@@ -123,7 +123,7 @@ yarn od -- doctor --app demo-mock
 - Core **默认只监听 127.0.0.1**，请勿在未配置防火墙时绑定 `0.0.0.0`。
 - `/v1/sessions/:id/cdp/`* 为调试流量，**不强制 Bearer**，以便 DevTools / CDP 客户端；依赖 **仅本机回环** 与上游会话隔离。
 - **CDP 等效高权限**：可执行页面脚本与访问调试协议，勿向公网暴露。
-- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close`、`renderer-globals` 等）需会话侧 **`allowScriptExecution: true`**（**`POST /v1/profiles` 新建 Profile 时默认 `true`**；旧数据或未迁移会话仍可能为 `false`，可显式传 `allowScriptExecution: false` 关闭）。只读类（如 `state`、`get`、`explore`、`screenshot`、`network`、`console-messages`、`window-state`）以及仅 `ms`、不含 `selector` 的 `wait`、以及窗口前置 `focus-window` 不需要。
+- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close`、`renderer-globals`、`runtime-exception` 等）需会话侧 **`allowScriptExecution: true`**（**`POST /v1/profiles` 新建 Profile 时默认 `true`**；旧数据或未迁移会话仍可能为 `false`，可显式传 `allowScriptExecution: false` 关闭）。只读类（如 `state`、`get`、`explore`、`screenshot`、`network`、`network-observe`、`console-messages`、`window-state`）以及仅 `ms`、不含 `selector` 的 `wait`、以及窗口前置 `focus-window` 不需要。
 
 ## 语义层与可观测 API（Bearer）
 
@@ -135,6 +135,8 @@ yarn od -- doctor --app demo-mock
 | `GET /v1/sessions/:id/list-window`                            | 窗口/调试目标列表（归一化 CDP `/json/list`）；`/topology` 为兼容别名                                                                 |
 | `GET /v1/sessions/:id/metrics`                              | 子进程 CPU/内存；不可得时 `metrics: null` + `reason`                                                                               |
 | `GET /v1/sessions/:id/console/stream?targetId=<id>`        | **SSE**（`text/event-stream`）：订阅后持续推送 `Runtime.consoleAPICalled`（仅连接建立后的新日志，无历史）。需 Bearer；会话非 `running` 或无 CDP 时 **503**；全局并发路数有上限时 **429**。与下方 Agent `console-messages` **短时采样**互补，**不含 Network 监听**。 |
+| `GET /v1/sessions/:id/network/stream?targetId=<id>`       | **SSE**：每条请求完成（`loadingFinished`/`loadingFailed`）推送元数据 JSON（**无 body**）。可选 `stripQuery`（默认 true）、`maxEventsPerSecond`（默认 40，上限 200）；超速率时丢弃并 `event: warning`（`NETWORK_SSE_RATE_LIMIT`）。与 `network-observe` **窗口聚合**互补。并发上限 **429**。 |
+| `GET /v1/sessions/:id/runtime-exception/stream?targetId=<id>` | **SSE**：持续推送 `Runtime.exceptionThrown` 解析结果（与短时 `runtime-exception` action 字段对齐）。**须** `allowScriptExecution: true`，否则 **403**。每分钟推送上限，超限丢弃并 `event: warning`。并发上限 **429**。 |
 | `GET /v1/sessions/:id/logs/export?format=jsonl&level=error` | 服务端过滤后导出（`format=txt` 亦可）                                                                                                |
 | `GET /v1/agent/sessions/:id/snapshot`                       | OODA 结构化快照（拓扑摘要、错误计数、指标等）                                                                                                |
 | `POST /v1/agent/sessions/:id/actions`                       | JSON：`action` 使用与 **OpenCLI `operate`** 同一套动词标识（见下表）。`GET /v1/version` 的 `agentActions` 列出当前接受的 canonical 名与历史别名。 |
@@ -142,8 +144,14 @@ yarn od -- doctor --app demo-mock
 | `GET /v1/agent/sessions/:id/recipes/:appSlug/:recipeId`      | 读取单份配方 JSON（`recipeId` 不含 `.json` 后缀） |
 | `POST /v1/agent/sessions/:id/recipes/:appSlug/:recipeId/run` | 执行配方：`{ "targetId": "...", "verifiedBuild": "可选" }`。需 **`allowScriptExecution: true`**（与 `click` 相同）。成功后**原子写回**更新后的 `selector` / `updatedAt`（及可选 `verifiedBuild`） |
 
+`curl -N` 消费网络观测 SSE 示例（需替换 `TOKEN`、`SESSION`、`TARGET`）：
 
-`GET /v1/version` 的 `capabilities` 数组可用来探测是否启用 Agent 等。
+```bash
+curl -N -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:8787/v1/sessions/$SESSION/network/stream?targetId=$TARGET"
+```
+
+`GET /v1/version` 的 `capabilities` 数组可用来探测是否启用 Agent 等；**`sseObservabilityStreams`** / **`sseObservabilityStreamPaths`** 列出网络与运行时异常两类观测 SSE 的可发现名与路径模板。
 
 **操作配方目录**：默认 `<数据目录>/recipes/`，可按应用分子目录存放，例如 `recipes/<appSlug>/<recipeId>.json`。覆盖目录：`OPENDESKTOP_RECIPES_DIR`。配方 `schemaVersion: 1`，步骤目前仅支持 `action: "click"`；若首次 `click` 失败，可在步骤上配置 `match`（如 `labelContains`）以触发 **DOM 探索兜底**（与 `explore` 同源解析），唯一匹配后重试并写回新 `selector`。
 
@@ -165,6 +173,7 @@ yarn od -- doctor --app demo-mock
 | `back` | 历史后退并等待加载 | `targetId` | 已实现（需脚本） |
 | `eval` | `Runtime.evaluate` | `targetId`, `expression` | 已实现（需脚本） |
 | `network` | 只读 Cookie（`Network.getCookies`） | `targetId`, 可选 `urls` 数组 | 已实现 |
+| `network-observe` | 短时窗口内 CDP `Network` 聚合：发起数、完成数、`maxConcurrent`、慢请求列表等；**不含** request/response body（MVP） | `targetId`；可选 `windowMs`（100～30000，默认 3000）、`slowThresholdMs`（默认 1000）、`maxSlowRequests`（1～100，默认 20）、`stripQuery`（默认 true，去掉 query/hash） | 已实现（**不需** `allowScriptExecution`） |
 | `init` | 对齐 OpenCLI 的初始化语义 | 无额外必填 | 已实现（Core 侧 no-op 说明） |
 | `verify` | 表达式求值须为 truthy | `targetId`, `expression` | 已实现（需脚本） |
 | `close` | `Target.closeTarget` 关闭调试目标 | `targetId` | 已实现（需脚本） |
@@ -172,6 +181,9 @@ yarn od -- doctor --app demo-mock
 | `focus-window` | `Page.bringToFront`，尝试激活该 target 所在窗口 | `targetId` | 已实现（扩展） |
 | `renderer-globals` | CDP `Runtime.evaluate` 反射枚举 `globalThis` 属性（`typeof`、可选 interest 正则匹配名）；**非**跨进程持有 live `window` | `targetId`，可选 `interestPattern`、`maxKeys`（默认条数上限见 Core） | 已实现（需脚本） |
 | `console-messages` | 短时采样控制台 | `targetId`, 可选 `waitMs` | 已实现（OpenDesktop 扩展，非 OpenCLI 表内） |
+| `runtime-exception` | 短时订阅 `Runtime.exceptionThrown`，返回首条未捕获异常的文案与结构化栈帧（`frames`）；**无历史回溯**，与 `console-messages` 同为增量观测 | `targetId`，可选 `waitMs`（默认 2000，上限 30s） | 已实现（需 `allowScriptExecution`；OpenDesktop 扩展） |
+
+`console-messages` 面向 **`Runtime.consoleAPICalled`** 字符串日志；**`runtime-exception`** 面向 **未捕获异常** 与 **`exceptionDetails.stackTrace`**。二者均只在监听窗口内收**新事件**，不能像服务端日志那样回溯过去。
 
 Studio 中「实时控制台」使用 **`GET .../console/stream`**（`fetch` + SSE 解析，可带 `Authorization`）；「控制台」按钮仍走 **`console-messages`** 短时采样。
 

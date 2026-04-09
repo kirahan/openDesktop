@@ -22,6 +22,12 @@ export const APP_FIRST_COMMANDS = new Set([
   "metrics",
   "list-global",
   "explore",
+  "network-observe",
+  "network-stream",
+  "console-observe",
+  "console-stream",
+  "stack-observe",
+  "stack-stream",
 ]);
 
 export type AppFirstSubcommand =
@@ -30,7 +36,13 @@ export type AppFirstSubcommand =
   | "metrics"
   | "topology"
   | "list-global"
-  | "explore";
+  | "explore"
+  | "network-observe"
+  | "network-stream"
+  | "console-observe"
+  | "console-stream"
+  | "stack-observe"
+  | "stack-stream";
 
 export interface AppFirstParseOk {
   kind: "ok";
@@ -40,7 +52,7 @@ export interface AppFirstParseOk {
   sessionId?: string;
   appId: string;
   command: AppFirstSubcommand;
-  /** list-global / explore：可省略，运行时从 list-window 拓扑取第一个 page target */
+  /** list-global / explore / network-* / console-* / stack-*：可省略，运行时从 list-window 拓扑取第一个 page target */
   targetId?: string;
   interestPattern?: string;
   maxKeys?: number;
@@ -50,6 +62,16 @@ export interface AppFirstParseOk {
   minScore?: number;
   /** explore：纳入类按钮 `<a href>`（启发式） */
   includeAnchorButtons?: boolean;
+  /** network-observe：观测窗口毫秒（可选，默认由 Core 决定） */
+  windowMs?: number;
+  /** network-observe：慢请求阈值毫秒（可选） */
+  slowThresholdMs?: number;
+  /** network-observe / network-stream：为 false 时保留 URL query/hash（默认 true，与 Core 一致） */
+  stripQuery?: boolean;
+  /** network-stream：`maxEventsPerSecond` query（1～200，可选） */
+  maxEventsPerSecond?: number;
+  /** console-observe / stack-observe：对应 Agent `waitMs`（100～30000，与 Core CDP 采集一致） */
+  waitMs?: number;
 }
 
 export interface AppFirstParseErr {
@@ -61,7 +83,7 @@ export interface AppFirstParseErr {
 export type AppFirstParseResult = AppFirstParseOk | AppFirstParseErr | { kind: "not-app-first" };
 
 /**
- * 自 process.argv.slice(2) 解析 App-first：`od [flags] <appId> <snapshot|list-window|metrics|list-global|explore>`（`topology` 为别名）
+ * 自 process.argv.slice(2) 解析 App-first：`od [flags] <appId> <子命令>`（`topology` 为 list-window 别名；含 network/console/stack 的 observe|stream）
  */
 export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
   const opts: {
@@ -75,6 +97,11 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
     maxCandidates?: number;
     minScore?: number;
     includeAnchorButtons?: boolean;
+    windowMs?: number;
+    slowThresholdMs?: number;
+    stripQuery?: boolean;
+    maxEventsPerSecond?: number;
+    waitMs?: number;
   } = {};
   const pos: string[] = [];
   let i = 0;
@@ -164,6 +191,55 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
       i += 1;
       continue;
     }
+    if (a === "--window-ms") {
+      const v = argv[i + 1];
+      if (!v) return { kind: "error", message: "--window-ms 需要参数", exitCode: EX_USAGE };
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 100 || n > 30_000) {
+        return { kind: "error", message: "--window-ms 须为 100～30000", exitCode: EX_USAGE };
+      }
+      opts.windowMs = Math.floor(n);
+      i += 2;
+      continue;
+    }
+    if (a === "--slow-ms") {
+      const v = argv[i + 1];
+      if (!v) return { kind: "error", message: "--slow-ms 需要参数", exitCode: EX_USAGE };
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0) {
+        return { kind: "error", message: "--slow-ms 须为非负数", exitCode: EX_USAGE };
+      }
+      opts.slowThresholdMs = Math.floor(n);
+      i += 2;
+      continue;
+    }
+    if (a === "--no-strip-query") {
+      opts.stripQuery = false;
+      i += 1;
+      continue;
+    }
+    if (a === "--max-events-per-second") {
+      const v = argv[i + 1];
+      if (!v) return { kind: "error", message: "--max-events-per-second 需要参数", exitCode: EX_USAGE };
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 1 || n > 200) {
+        return { kind: "error", message: "--max-events-per-second 须为 1～200", exitCode: EX_USAGE };
+      }
+      opts.maxEventsPerSecond = Math.floor(n);
+      i += 2;
+      continue;
+    }
+    if (a === "--wait-ms") {
+      const v = argv[i + 1];
+      if (!v) return { kind: "error", message: "--wait-ms 需要参数", exitCode: EX_USAGE };
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 100 || n > 30_000) {
+        return { kind: "error", message: "--wait-ms 须为 100～30000（与 Core console-messages / runtime-exception 采集一致）", exitCode: EX_USAGE };
+      }
+      opts.waitMs = Math.floor(n);
+      i += 2;
+      continue;
+    }
     if (a.startsWith("-")) {
       return { kind: "not-app-first" };
     }
@@ -184,7 +260,7 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
     return {
       kind: "error",
       message:
-        `未知 App-first 子命令「${cmd}」。可用: list-window | metrics | snapshot | list-global | explore（topology 与 list-window 等价）`,
+        `未知 App-first 子命令「${cmd}」。可用: list-window | metrics | snapshot | list-global | explore | network-observe | network-stream | console-observe | console-stream | stack-observe | stack-stream（topology 与 list-window 等价）`,
       exitCode: EX_USAGE,
     };
   }
@@ -203,5 +279,10 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
     maxCandidates: opts.maxCandidates,
     minScore: opts.minScore,
     includeAnchorButtons: opts.includeAnchorButtons,
+    windowMs: opts.windowMs,
+    slowThresholdMs: opts.slowThresholdMs,
+    stripQuery: opts.stripQuery,
+    maxEventsPerSecond: opts.maxEventsPerSecond,
+    waitMs: opts.waitMs,
   };
 }

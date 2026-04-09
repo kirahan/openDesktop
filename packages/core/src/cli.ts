@@ -91,10 +91,14 @@ async function main() {
       "after",
       `
 App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
-  yarn oc <appId> list-window | metrics | snapshot | list-global | explore
+  yarn oc <appId> list-window | metrics | snapshot | list-global | explore | network-observe | network-stream | console-observe | console-stream | stack-observe | stack-stream
   yarn oc <appId> topology          # 与 list-window 等价
   可选: --format json|--session <uuid>|--target|--interest|--max-keys（list-global）
         explore: --max-candidates|--min-score|--include-anchor-buttons
+        network-observe: --window-ms|--slow-ms|--no-strip-query（短时 JSON）
+        network-stream: --no-strip-query|--max-events-per-second（SSE；--format 不适用）
+        console-observe | stack-observe: --wait-ms（短时采样 JSON，100～30000）
+        console-stream | stack-stream: SSE 长流（Ctrl+C 结束；stack 需会话允许脚本执行）
 全局安装的入口名为 od，与 yarn oc 指向同一 CLI。`,
     );
 

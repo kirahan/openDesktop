@@ -6,6 +6,7 @@ import {
   clickOnTarget,
   closeTarget,
   collectConsoleMessagesForTarget,
+  collectRuntimeExceptionForTarget,
   evaluateOnTarget,
   getNetworkCookiesForTarget,
   getTargetDocumentOuterHtml,
@@ -19,6 +20,12 @@ import {
   waitOnTarget,
 } from "../cdp/browserClient.js";
 import { extractButtonCandidatesFromHtml } from "../cdp/domExplore.js";
+import {
+  clampMaxSlowRequests,
+  clampSlowThresholdMs,
+  clampWindowMs,
+  collectNetworkObservationForTarget,
+} from "../cdp/networkObserve.js";
 import {
   collectRendererGlobalSnapshotOnTarget,
   parseInterestPattern,
@@ -170,6 +177,14 @@ export function registerObservabilityRoutes(v1: Router, deps: ObsDeps): void {
       minScore?: number;
       /** explore：是否纳入类按钮 `<a href>`（启发式） */
       includeAnchorButtons?: boolean;
+      /** network-observe：观测窗口毫秒（100～30000，默认 3000） */
+      windowMs?: number;
+      /** network-observe：慢请求阈值毫秒（默认 1000） */
+      slowThresholdMs?: number;
+      /** network-observe：慢请求最大条数（1～100，默认 20） */
+      maxSlowRequests?: number;
+      /** network-observe：是否从展示 URL 去掉 query/hash（默认 true） */
+      stripQuery?: boolean;
     };
     const actionRaw = typeof body.action === "string" ? body.action.trim() : "";
     if (!actionRaw) return jsonError(res, 400, "VALIDATION_ERROR", "action required");
@@ -296,6 +311,31 @@ export function registerObservabilityRoutes(v1: Router, deps: ObsDeps): void {
         await audit(true, { targetId: body.targetId });
         return res.json({ entries: cons.entries, note: cons.note, waitMs });
       }
+      if (canonical === "runtime-exception") {
+        if (!ctx.allowScriptExecution) {
+          await audit(false, { reason: "script_disabled" });
+          return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+        }
+        if (!body.targetId) {
+          await audit(false, { reason: "missing_targetId" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId required for ${actionRaw}`);
+        }
+        const waitMs =
+          typeof body.waitMs === "number" && Number.isFinite(body.waitMs) ? body.waitMs : 2000;
+        const ex = await collectRuntimeExceptionForTarget(ctx.cdpPort, body.targetId, waitMs);
+        if ("error" in ex) {
+          await audit(false, { reason: ex.error });
+          return jsonError(res, 502, "RUNTIME_EXCEPTION_FAILED", ex.error);
+        }
+        await audit(true, { targetId: body.targetId });
+        return res.json({
+          text: ex.text,
+          textTruncated: ex.textTruncated,
+          frames: ex.frames,
+          note: ex.note,
+          waitMs,
+        });
+      }
       if (canonical === "init") {
         await audit(true);
         return res.json({
@@ -339,6 +379,29 @@ export function registerObservabilityRoutes(v1: Router, deps: ObsDeps): void {
         }
         await audit(true, { targetId: body.targetId });
         return res.json({ cookies: net.cookies });
+      }
+      if (canonical === "network-observe") {
+        if (!body.targetId || typeof body.targetId !== "string" || !body.targetId.trim()) {
+          await audit(false, { reason: "missing_targetId" });
+          return jsonError(res, 400, "VALIDATION_ERROR", `targetId required for ${actionRaw}`);
+        }
+        const targetId = body.targetId.trim();
+        const windowMs = clampWindowMs(body.windowMs);
+        const slowThresholdMs = clampSlowThresholdMs(body.slowThresholdMs);
+        const maxSlowRequests = clampMaxSlowRequests(body.maxSlowRequests);
+        const stripQuery = body.stripQuery !== false;
+        const obs = await collectNetworkObservationForTarget(ctx.cdpPort, targetId, {
+          windowMs,
+          slowThresholdMs,
+          maxSlowRequests,
+          stripQuery,
+        });
+        if ("error" in obs) {
+          await audit(false, { reason: obs.error });
+          return jsonError(res, 502, "NETWORK_OBSERVE_FAILED", obs.error);
+        }
+        await audit(true, { targetId });
+        return res.json(obs);
       }
       if (canonical === "click") {
         if (!ctx.allowScriptExecution) {

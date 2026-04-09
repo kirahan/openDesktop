@@ -1,3 +1,4 @@
+import process from "node:process";
 import { EX_NOINPUT, EX_USAGE } from "./exitCodes.js";
 import type { CliHttpContext } from "./httpClient.js";
 import { buildCliHttpContext, fetchWithBearer } from "./httpClient.js";
@@ -24,6 +25,77 @@ export function pickListGlobalTargetId(nodes: TopologyNode[]): { targetId: strin
     return { error: "list-window 无可用 target（子进程 CDP 未就绪或无调试目标）" };
   }
   return { targetId: nodes[0]!.targetId };
+}
+
+async function resolveTargetForAppFirst(
+  parsed: AppFirstParseOk,
+  httpCtx: CliHttpContext,
+  sessionId: string,
+  writeErr: (s: string) => void,
+): Promise<{ ok: true; targetId: string } | { ok: false; exit: number }> {
+  let targetId = parsed.targetId?.trim() ?? "";
+  if (targetId) return { ok: true, targetId };
+  const topoRes = await fetchWithBearer(httpCtx, "GET", `/v1/sessions/${sessionId}/list-window`);
+  if (!topoRes.ok) {
+    const errText = await topoRes.text();
+    writeErr(`拉取 list-window 失败 HTTP ${topoRes.status}: ${errText}`);
+    return { ok: false, exit: exitCodeForHttpStatus(topoRes.status) };
+  }
+  const topo = (await readJson(topoRes)) as { nodes?: TopologyNode[] };
+  const nodes = Array.isArray(topo.nodes) ? topo.nodes : [];
+  const picked = pickListGlobalTargetId(nodes);
+  if ("error" in picked) {
+    writeErr(picked.error);
+    return { ok: false, exit: EX_USAGE };
+  }
+  return { ok: true, targetId: picked.targetId };
+}
+
+async function pumpSseGet(
+  url: string,
+  token: string,
+  writeOut: (s: string) => void,
+  writeErr: (s: string) => void,
+): Promise<number> {
+  const ac = new AbortController();
+  const onSig = (): void => {
+    ac.abort();
+  };
+  process.on("SIGINT", onSig);
+  process.on("SIGTERM", onSig);
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+      signal: ac.signal,
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      writeErr(`HTTP ${res.status}: ${errText}`);
+      return exitCodeForHttpStatus(res.status);
+    }
+    const reader = res.body?.getReader();
+    if (!reader) {
+      writeErr("响应无可读 body 流");
+      return 1;
+    }
+    const dec = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) writeOut(dec.decode(value, { stream: true }));
+    }
+    return 0;
+  } catch (e) {
+    if (ac.signal.aborted) return 130;
+    const name = e instanceof Error ? e.name : "";
+    if (name === "AbortError") return 130;
+    writeErr(e instanceof Error ? e.message : String(e));
+    return exitCodeForFetchError(e);
+  } finally {
+    process.off("SIGINT", onSig);
+    process.off("SIGTERM", onSig);
+  }
 }
 
 async function resolveSessionId(
@@ -124,24 +196,105 @@ export async function runAppFirst(
   }
 
   try {
-    if (parsed.command === "list-global") {
-      let targetId = parsed.targetId?.trim() ?? "";
-      if (!targetId) {
-        const topoRes = await fetchWithBearer(httpCtx, "GET", `/v1/sessions/${sessionId}/list-window`);
-        if (!topoRes.ok) {
-          const errText = await topoRes.text();
-          writeErr(`拉取 list-window 失败 HTTP ${topoRes.status}: ${errText}`);
-          return exitCodeForHttpStatus(topoRes.status);
-        }
-        const topo = (await readJson(topoRes)) as { nodes?: TopologyNode[] };
-        const nodes = Array.isArray(topo.nodes) ? topo.nodes : [];
-        const picked = pickListGlobalTargetId(nodes);
-        if ("error" in picked) {
-          writeErr(picked.error);
-          return EX_USAGE;
-        }
-        targetId = picked.targetId;
+    if (parsed.command === "network-stream") {
+      const rt = await resolveTargetForAppFirst(parsed, httpCtx, sessionId, writeErr);
+      if (!rt.ok) return rt.exit;
+      const params = new URLSearchParams();
+      params.set("targetId", rt.targetId);
+      if (parsed.stripQuery === false) params.set("stripQuery", "false");
+      if (parsed.maxEventsPerSecond !== undefined) {
+        params.set("maxEventsPerSecond", String(parsed.maxEventsPerSecond));
       }
+      const url = `${httpCtx.baseUrl}/v1/sessions/${sessionId}/network/stream?${params.toString()}`;
+      return await pumpSseGet(url, httpCtx.token, writeOut, writeErr);
+    }
+
+    if (parsed.command === "console-stream") {
+      const rt = await resolveTargetForAppFirst(parsed, httpCtx, sessionId, writeErr);
+      if (!rt.ok) return rt.exit;
+      const params = new URLSearchParams({ targetId: rt.targetId });
+      const url = `${httpCtx.baseUrl}/v1/sessions/${sessionId}/console/stream?${params.toString()}`;
+      return await pumpSseGet(url, httpCtx.token, writeOut, writeErr);
+    }
+
+    if (parsed.command === "stack-stream") {
+      const rt = await resolveTargetForAppFirst(parsed, httpCtx, sessionId, writeErr);
+      if (!rt.ok) return rt.exit;
+      const params = new URLSearchParams({ targetId: rt.targetId });
+      const url = `${httpCtx.baseUrl}/v1/sessions/${sessionId}/runtime-exception/stream?${params.toString()}`;
+      return await pumpSseGet(url, httpCtx.token, writeOut, writeErr);
+    }
+
+    if (parsed.command === "network-observe") {
+      const rt = await resolveTargetForAppFirst(parsed, httpCtx, sessionId, writeErr);
+      if (!rt.ok) return rt.exit;
+      const targetId = rt.targetId;
+
+      const body: Record<string, unknown> = {
+        action: "network-observe",
+        targetId,
+      };
+      if (parsed.windowMs !== undefined) body.windowMs = parsed.windowMs;
+      if (parsed.slowThresholdMs !== undefined) body.slowThresholdMs = parsed.slowThresholdMs;
+      if (parsed.stripQuery === false) body.stripQuery = false;
+      const res = await fetchWithBearer(
+        httpCtx,
+        "POST",
+        `/v1/agent/sessions/${sessionId}/actions`,
+        body,
+      );
+      if (!res.ok) {
+        const errText = await res.text();
+        writeErr(`HTTP ${res.status}: ${errText}`);
+        return exitCodeForHttpStatus(res.status);
+      }
+      const data = await readJson(res);
+      printStructured(data, parsed.format, writeOut);
+      return 0;
+    }
+
+    if (parsed.command === "console-observe") {
+      const rt = await resolveTargetForAppFirst(parsed, httpCtx, sessionId, writeErr);
+      if (!rt.ok) return rt.exit;
+      const body: Record<string, unknown> = {
+        action: "console-messages",
+        targetId: rt.targetId,
+      };
+      if (parsed.waitMs !== undefined) body.waitMs = parsed.waitMs;
+      const res = await fetchWithBearer(httpCtx, "POST", `/v1/agent/sessions/${sessionId}/actions`, body);
+      if (!res.ok) {
+        const errText = await res.text();
+        writeErr(`HTTP ${res.status}: ${errText}`);
+        return exitCodeForHttpStatus(res.status);
+      }
+      const data = await readJson(res);
+      printStructured(data, parsed.format, writeOut);
+      return 0;
+    }
+
+    if (parsed.command === "stack-observe") {
+      const rt = await resolveTargetForAppFirst(parsed, httpCtx, sessionId, writeErr);
+      if (!rt.ok) return rt.exit;
+      const body: Record<string, unknown> = {
+        action: "runtime-exception",
+        targetId: rt.targetId,
+      };
+      if (parsed.waitMs !== undefined) body.waitMs = parsed.waitMs;
+      const res = await fetchWithBearer(httpCtx, "POST", `/v1/agent/sessions/${sessionId}/actions`, body);
+      if (!res.ok) {
+        const errText = await res.text();
+        writeErr(`HTTP ${res.status}: ${errText}`);
+        return exitCodeForHttpStatus(res.status);
+      }
+      const data = await readJson(res);
+      printStructured(data, parsed.format, writeOut);
+      return 0;
+    }
+
+    if (parsed.command === "list-global") {
+      const rt = await resolveTargetForAppFirst(parsed, httpCtx, sessionId, writeErr);
+      if (!rt.ok) return rt.exit;
+      const targetId = rt.targetId;
 
       const body: Record<string, unknown> = {
         action: "renderer-globals",
@@ -167,23 +320,9 @@ export async function runAppFirst(
     }
 
     if (parsed.command === "explore") {
-      let targetId = parsed.targetId?.trim() ?? "";
-      if (!targetId) {
-        const topoRes = await fetchWithBearer(httpCtx, "GET", `/v1/sessions/${sessionId}/list-window`);
-        if (!topoRes.ok) {
-          const errText = await topoRes.text();
-          writeErr(`拉取 list-window 失败 HTTP ${topoRes.status}: ${errText}`);
-          return exitCodeForHttpStatus(topoRes.status);
-        }
-        const topo = (await readJson(topoRes)) as { nodes?: TopologyNode[] };
-        const nodes = Array.isArray(topo.nodes) ? topo.nodes : [];
-        const picked = pickListGlobalTargetId(nodes);
-        if ("error" in picked) {
-          writeErr(picked.error);
-          return EX_USAGE;
-        }
-        targetId = picked.targetId;
-      }
+      const rt = await resolveTargetForAppFirst(parsed, httpCtx, sessionId, writeErr);
+      if (!rt.ok) return rt.exit;
+      const targetId = rt.targetId;
 
       const body: Record<string, unknown> = {
         action: "explore",
