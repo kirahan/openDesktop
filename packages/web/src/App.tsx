@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 type DetailKind = "list-window" | "metrics" | "snapshot";
 
@@ -528,15 +528,431 @@ function pageInspectorBtnStyle(loading: boolean): React.CSSProperties {
   };
 }
 
+type LiveConsoleTabState = {
+  id: string;
+  sessionId: string;
+  targetId: string;
+  label: string;
+  lines: string[];
+  running: boolean;
+  err: string | null;
+};
+
+const LiveConsoleDockContext = React.createContext<{
+  openLiveTab: (p: { sessionId: string; targetId: string; label: string }) => void;
+} | null>(null);
+
+function useLiveConsoleDock(): { openLiveTab: (p: { sessionId: string; targetId: string; label: string }) => void } | null {
+  return useContext(LiveConsoleDockContext);
+}
+
+/** 右侧实时日志抽屉：默认收起；多 tab，每 tab 对应一个 (session, target) */
+function LiveConsoleDockLayout({
+  apiRoot,
+  token,
+  children,
+}: {
+  apiRoot: string;
+  token: string;
+  children: React.ReactNode;
+}) {
+  const [tabs, setTabs] = useState<LiveConsoleTabState[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const abortMap = useRef<Map<string, AbortController>>(new Map());
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDrawerOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawerOpen]);
+
+  const openLiveTab = useCallback((p: { sessionId: string; targetId: string; label: string }) => {
+    const id = `${p.sessionId}::${p.targetId}`;
+    setTabs((prev) => {
+      if (prev.some((t) => t.id === id)) return prev;
+      return [
+        ...prev,
+        {
+          id,
+          sessionId: p.sessionId,
+          targetId: p.targetId,
+          label: p.label.slice(0, 48) || p.targetId.slice(0, 12),
+          lines: [],
+          running: false,
+          err: null,
+        },
+      ];
+    });
+    setActiveId(id);
+    setDrawerOpen(true);
+  }, []);
+
+  const stopStream = useCallback((tabId: string) => {
+    abortMap.current.get(tabId)?.abort();
+    abortMap.current.delete(tabId);
+    setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, running: false } : t)));
+  }, []);
+
+  const clearTabLines = useCallback((tabId: string) => {
+    setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, lines: [] } : t)));
+  }, []);
+
+  const closeTab = useCallback(
+    (tabId: string) => {
+      abortMap.current.get(tabId)?.abort();
+      abortMap.current.delete(tabId);
+      setTabs((prev) => {
+        const next = prev.filter((t) => t.id !== tabId);
+        setActiveId((a) => {
+          if (a !== tabId) return a;
+          return next[0]?.id ?? null;
+        });
+        return next;
+      });
+    },
+    [],
+  );
+
+  const startStream = useCallback(
+    async (tabId: string, sessionId: string, targetId: string) => {
+      stopStream(tabId);
+      setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, err: null, running: true } : t)));
+      const ac = new AbortController();
+      abortMap.current.set(tabId, ac);
+      const path = `/v1/sessions/${sessionId}/console/stream?targetId=${encodeURIComponent(targetId)}`;
+      const url = apiRoot ? `${apiRoot.replace(/\/$/, "")}${path}` : path;
+      const MAX_LINES = 500;
+      const tokenTrim = token.trim();
+      try {
+        const res = await fetch(url, {
+          headers: { Authorization: `Bearer ${tokenTrim}` },
+          signal: ac.signal,
+        });
+        if (!res.ok) {
+          const t = await res.text();
+          let msg = `HTTP ${res.status}`;
+          try {
+            const j = JSON.parse(t) as { error?: { message?: string } };
+            msg = j.error?.message ?? msg;
+          } catch {
+            msg = t.slice(0, 200);
+          }
+          throw new Error(msg);
+        }
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error("响应无 body");
+        const dec = new TextDecoder();
+        let buf = "";
+        while (!ac.signal.aborted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          for (;;) {
+            const idx = buf.indexOf("\n\n");
+            if (idx < 0) break;
+            const block = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            let evName: string | undefined;
+            const dataLines: string[] = [];
+            for (const line of block.split("\n")) {
+              if (line.startsWith("event: ")) evName = line.slice(7).trim();
+              else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+            }
+            const raw = dataLines.join("\n");
+            if (!raw) continue;
+            if (evName === "ready") continue;
+            if (evName === "error") {
+              try {
+                const e = JSON.parse(raw) as { message?: string };
+                setTabs((prev) =>
+                  prev.map((t) => (t.id === tabId ? { ...t, err: e.message ?? raw } : t)),
+                );
+              } catch {
+                setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, err: raw } : t)));
+              }
+              continue;
+            }
+            try {
+              const entry = JSON.parse(raw) as { type?: string; argsPreview?: string[] };
+              const lineText = `[${entry.type ?? "log"}] ${(entry.argsPreview ?? []).join(" ")}`;
+              setTabs((prev) =>
+                prev.map((t) => {
+                  if (t.id !== tabId) return t;
+                  const next = [...t.lines, lineText];
+                  return { ...t, lines: next.length > MAX_LINES ? next.slice(-MAX_LINES) : next };
+                }),
+              );
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      } catch (e) {
+        if (!ac.signal.aborted) {
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === tabId ? { ...t, err: e instanceof Error ? e.message : String(e) } : t,
+            ),
+          );
+        }
+      } finally {
+        abortMap.current.delete(tabId);
+        setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, running: false } : t)));
+      }
+    },
+    [apiRoot, token, stopStream],
+  );
+
+  const ctxValue = useMemo(() => ({ openLiveTab }), [openLiveTab]);
+
+  const active = tabs.find((t) => t.id === activeId) ?? null;
+  const tokenOk = token.trim().length > 0;
+
+  return (
+    <LiveConsoleDockContext.Provider value={ctxValue}>
+      <div style={{ width: "100%" }}>{children}</div>
+      {!drawerOpen && (
+        <button
+          type="button"
+          aria-label={tabs.length > 0 ? `打开实时控制台，已打开 ${tabs.length} 个标签` : "打开实时控制台"}
+          onClick={() => setDrawerOpen(true)}
+          title={tabs.length > 0 ? `已打开 ${tabs.length} 个标签` : "打开实时控制台"}
+          style={{
+            position: "fixed",
+            right: 16,
+            bottom: 24,
+            zIndex: 1060,
+            padding: "10px 14px",
+            borderRadius: 10,
+            border: "none",
+            background: "#2563eb",
+            color: "#fff",
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: "pointer",
+            boxShadow: "0 4px 14px rgba(37, 99, 235, 0.35)",
+          }}
+        >
+          实时控制台{tabs.length > 0 ? ` · ${tabs.length}` : ""}
+        </button>
+      )}
+      {drawerOpen && (
+        <div
+          role="presentation"
+          aria-hidden
+          onClick={() => setDrawerOpen(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1040,
+            background: "rgba(15, 23, 42, 0.38)",
+          }}
+        />
+      )}
+      <aside
+        role="dialog"
+        aria-modal="true"
+        aria-hidden={!drawerOpen}
+        aria-label="实时控制台"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          position: "fixed",
+          right: 0,
+          top: 0,
+          bottom: 0,
+          width: "min(340px, 100vw)",
+          zIndex: 1050,
+          display: "flex",
+          flexDirection: "column",
+          maxHeight: "100vh",
+          borderRadius: "12px 0 0 12px",
+          border: `1px solid ${OBS_PALETTE.border}`,
+          borderRight: "none",
+          background: "#fff",
+          boxShadow: "-4px 0 24px rgba(15,23,42,0.12)",
+          overflow: "hidden",
+          transform: drawerOpen ? "translateX(0)" : "translateX(100%)",
+          transition: "transform 0.22s ease-out",
+          pointerEvents: drawerOpen ? "auto" : "none",
+        }}
+      >
+        <div
+          style={{
+            padding: "10px 12px",
+            borderBottom: `1px solid ${OBS_PALETTE.border}`,
+            background: "#f8fafc",
+            fontSize: 13,
+            fontWeight: 600,
+            color: "#0f172a",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            flexShrink: 0,
+          }}
+        >
+          <span>实时控制台</span>
+          <button
+            type="button"
+            onClick={() => setDrawerOpen(false)}
+            style={{
+              padding: "4px 10px",
+              fontSize: 12,
+              borderRadius: 6,
+              border: `1px solid ${OBS_PALETTE.border}`,
+              background: "#fff",
+              color: "#475569",
+              cursor: "pointer",
+            }}
+          >
+            收起
+          </button>
+        </div>
+          {!tokenOk ? (
+            <div style={{ padding: 12, fontSize: 12, color: OBS_PALETTE.textMuted }}>填写 Bearer 后可用</div>
+          ) : tabs.length === 0 ? (
+            <div style={{ padding: 12, fontSize: 12, color: OBS_PALETTE.textMuted, lineHeight: 1.5 }}>
+              在「窗口 / 调试目标」卡片中点击「打开实时日志」，或点右下角「实时控制台」，可为此 target 新开标签；多个窗口可开多 tab。
+            </div>
+          ) : (
+            <>
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 4,
+                  padding: "8px 8px 0",
+                  borderBottom: `1px solid ${OBS_PALETTE.border}`,
+                  background: "#fff",
+                  maxHeight: 120,
+                  overflowY: "auto",
+                }}
+              >
+                {tabs.map((t) => (
+                  <div
+                    key={t.id}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      maxWidth: "100%",
+                    }}
+                  >
+                    <button
+                      type="button"
+                      title={t.label}
+                      onClick={() => setActiveId(t.id)}
+                      style={{
+                        padding: "4px 8px",
+                        fontSize: 11,
+                        borderRadius: 6,
+                        border: `1px solid ${activeId === t.id ? OBS_PALETTE.borderActive : OBS_PALETTE.border}`,
+                        background: activeId === t.id ? "#eff6ff" : "#f8fafc",
+                        color: "#0f172a",
+                        cursor: "pointer",
+                        maxWidth: 200,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {t.label}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="关闭标签"
+                      onClick={() => closeTab(t.id)}
+                      style={{
+                        padding: "2px 6px",
+                        fontSize: 12,
+                        lineHeight: 1,
+                        border: "none",
+                        background: "transparent",
+                        color: "#94a3b8",
+                        cursor: "pointer",
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {active && (
+                <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 8, minHeight: 200 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                    <button
+                      type="button"
+                      disabled={!tokenOk || active.running}
+                      onClick={() => void startStream(active.id, active.sessionId, active.targetId)}
+                      style={pageInspectorBtnStyle(!tokenOk || active.running)}
+                    >
+                      {active.running ? "订阅中…" : "开始实时日志"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!active.running}
+                      onClick={() => stopStream(active.id)}
+                      style={pageInspectorBtnStyle(!active.running)}
+                    >
+                      停止
+                    </button>
+                    <button type="button" onClick={() => clearTabLines(active.id)} style={pageInspectorBtnStyle(false)}>
+                      清屏
+                    </button>
+                  </div>
+                  <p style={{ margin: 0, fontSize: 10, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
+                    SSE · 仅订阅后的新日志 · 与短时「控制台」采样不同 · 不含 Network
+                  </p>
+                  {active.err && (
+                    <div style={{ fontSize: 11, color: "#991b1b", lineHeight: 1.4 }}>{active.err}</div>
+                  )}
+                  {active.lines.length > 0 && (
+                    <pre
+                      style={{
+                        margin: 0,
+                        flex: 1,
+                        minHeight: 160,
+                        maxHeight: "min(420px, 55vh)",
+                        overflow: "auto",
+                        padding: 8,
+                        fontSize: 10,
+                        lineHeight: 1.4,
+                        background: "#0f172a",
+                        color: "#e2e8f0",
+                        borderRadius: 6,
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                      }}
+                    >
+                      {active.lines.join("\n")}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </aside>
+    </LiveConsoleDockContext.Provider>
+  );
+}
+
 /** page 卡片：截图 / DOM / 控制台（均走 Agent actions） */
 function PageTargetScreenshot({
   ctx,
   targetId,
   enabled,
+  windowTitle,
 }: {
   ctx: TopologySnapshotContext;
   targetId: string;
   enabled: boolean;
+  /** 用于实时控制台抽屉内标签标题 */
+  windowTitle: string;
 }) {
   const [shotLoading, setShotLoading] = useState(false);
   const [shotSrc, setShotSrc] = useState<string | null>(null);
@@ -569,6 +985,7 @@ function PageTargetScreenshot({
   const [interestPattern, setInterestPattern] = useState("");
 
   const tokenOk = ctx.token.trim().length > 0;
+  const liveDock = useLiveConsoleDock();
 
   const gatewayRoot = cdpGatewayHttpUrl(ctx.apiRoot, ctx.sessionId);
   const jsonListUrl = `${gatewayRoot}/json/list`;
@@ -852,6 +1269,33 @@ function PageTargetScreenshot({
         }}
       >
         <div style={{ fontSize: 11, fontWeight: 600, color: "#334155", marginBottom: 6 }}>DevTools 附加</div>
+        {liveDock && tokenOk && (
+          <div
+            style={{
+              marginBottom: 10,
+              paddingBottom: 10,
+              borderBottom: `1px solid ${OBS_PALETTE.border}`,
+            }}
+          >
+            <div style={{ fontSize: 11, fontWeight: 600, color: "#475569", marginBottom: 6 }}>实时日志（右侧抽屉）</div>
+            <p style={{ margin: "0 0 8px", fontSize: 10, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
+              使用右下角「实时控制台」或本按钮打开右侧抽屉查看 SSE；多窗口可开多个标签。与上方「控制台」短时采样不同，不含 Network。
+            </p>
+            <button
+              type="button"
+              onClick={() =>
+                liveDock.openLiveTab({
+                  sessionId: ctx.sessionId,
+                  targetId,
+                  label: windowTitle,
+                })
+              }
+              style={pageInspectorBtnStyle(false)}
+            >
+              打开实时日志
+            </button>
+          </div>
+        )}
         <div
           style={{
             marginBottom: 10,
@@ -1193,7 +1637,7 @@ function TopologyVisual({
           <code style={{ fontSize: 11 }}>screenshot</code> / <code style={{ fontSize: 11 }}>dom</code> /{" "}
           <code style={{ fontSize: 11 }}>console-messages</code>
           （默认不自动拉取）。下方「DevTools 附加」提供 <code style={{ fontSize: 11 }}>chrome://inspect</code>{" "}
-          用直连端口、CDP 网关、<code style={{ fontSize: 11 }}>devtools://</code>（须复制到 Chrome 地址栏）及<strong>窗口状态 / 前置窗口</strong>。控制台为短时监听，无历史回溯。需 Core
+          用直连端口、CDP 网关、<code style={{ fontSize: 11 }}>devtools://</code>（须复制到 Chrome 地址栏）及<strong>窗口状态 / 前置窗口</strong>。<strong>实时日志</strong>在<strong>右侧抽屉</strong>以多标签展示（平时收起；点右下角「实时控制台」或卡片内「打开实时日志」）。「控制台」按钮仍为短时监听，无历史回溯。需 Core
           开启 Agent API（可用 <code style={{ fontSize: 11 }}>OPENDESKTOP_AGENT_API=0</code> 关闭）。
           若出现 <code style={{ fontSize: 11 }}>Unknown action: dom</code>，说明运行的 Core 仍是旧构建：请在{" "}
           <code style={{ fontSize: 11 }}>packages/core</code> 执行 <code style={{ fontSize: 11 }}>yarn build</code>{" "}
@@ -1227,6 +1671,7 @@ function TopologyVisual({
                   ctx={{ ...snapshotCtx, sessionId: data.sessionId ?? snapshotCtx.sessionId }}
                   targetId={n.targetId}
                   enabled
+                  windowTitle={n.title || "（无标题）"}
                 />
               )}
               <div style={{ fontWeight: 600, fontSize: 13, color: "#0f172a", marginBottom: 6 }}>
@@ -1804,7 +2249,8 @@ export function App() {
         }
       `}</style>
 
-      <div style={{ maxWidth: 920, margin: "0 auto" }}>
+      <LiveConsoleDockLayout apiRoot={apiRoot ?? ""} token={tokenTrimmed}>
+      <div style={{ maxWidth: 920, margin: "0 auto", width: "100%" }}>
         <h1
           style={{
             margin: "0 0 6px",
@@ -2587,6 +3033,7 @@ export function App() {
           </div>
         </div>
       </div>
+      </LiveConsoleDockLayout>
     </div>
   );
 }

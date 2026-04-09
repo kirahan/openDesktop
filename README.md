@@ -134,6 +134,7 @@ yarn od -- doctor --app demo-mock
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `GET /v1/sessions/:id/list-window`                            | 窗口/调试目标列表（归一化 CDP `/json/list`）；`/topology` 为兼容别名                                                                 |
 | `GET /v1/sessions/:id/metrics`                              | 子进程 CPU/内存；不可得时 `metrics: null` + `reason`                                                                               |
+| `GET /v1/sessions/:id/console/stream?targetId=<id>`        | **SSE**（`text/event-stream`）：订阅后持续推送 `Runtime.consoleAPICalled`（仅连接建立后的新日志，无历史）。需 Bearer；会话非 `running` 或无 CDP 时 **503**；全局并发路数有上限时 **429**。与下方 Agent `console-messages` **短时采样**互补，**不含 Network 监听**。 |
 | `GET /v1/sessions/:id/logs/export?format=jsonl&level=error` | 服务端过滤后导出（`format=txt` 亦可）                                                                                                |
 | `GET /v1/agent/sessions/:id/snapshot`                       | OODA 结构化快照（拓扑摘要、错误计数、指标等）                                                                                                |
 | `POST /v1/agent/sessions/:id/actions`                       | JSON：`action` 使用与 **OpenCLI `operate`** 同一套动词标识（见下表）。`GET /v1/version` 的 `agentActions` 列出当前接受的 canonical 名与历史别名。 |
@@ -165,6 +166,8 @@ yarn od -- doctor --app demo-mock
 | `focus-window` | `Page.bringToFront`，尝试激活该 target 所在窗口 | `targetId` | 已实现（扩展） |
 | `renderer-globals` | CDP `Runtime.evaluate` 反射枚举 `globalThis` 属性（`typeof`、可选 interest 正则匹配名）；**非**跨进程持有 live `window` | `targetId`，可选 `interestPattern`、`maxKeys`（默认条数上限见 Core） | 已实现（需脚本） |
 | `console-messages` | 短时采样控制台 | `targetId`, 可选 `waitMs` | 已实现（OpenDesktop 扩展，非 OpenCLI 表内） |
+
+Studio 中「实时控制台」使用 **`GET .../console/stream`**（`fetch` + SSE 解析，可带 `Authorization`）；「控制台」按钮仍走 **`console-messages`** 短时采样。
 
 **Agent `action` 别名（旧客户端兼容）**
 

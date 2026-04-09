@@ -370,6 +370,83 @@ export async function collectConsoleMessagesForTarget(
   }
 }
 
+/**
+ * 持续监听 `Runtime.consoleAPICalled`，直到 `signal` abort（客户端断开）或 CDP 错误。
+ * 不读取历史控制台；与 {@link collectConsoleMessagesForTarget} 相同预览格式。
+ */
+export async function runConsoleMessageStream(
+  cdpPort: number,
+  targetId: string,
+  onEntry: (entry: ConsoleEntryPreview) => void,
+  signal: AbortSignal,
+): Promise<{ error?: string }> {
+  const wsUrl = await getBrowserWsUrl(cdpPort);
+  if (!wsUrl) return { error: "no_browser_ws" };
+
+  const ws = new WebSocket(wsUrl);
+  const closeWs = (): void => {
+    try {
+      ws.close();
+    } catch {
+      /* noop */
+    }
+  };
+
+  const abortPromise = new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve());
+      ws.once("error", reject);
+    });
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+
+  const cdp = new BrowserCdp(ws);
+  let flatSessionId: string | undefined;
+
+  cdp.onProtocolEvent = (method, params, eventSessionId) => {
+    if (method !== "Runtime.consoleAPICalled") return;
+    if (flatSessionId !== undefined && eventSessionId !== undefined && eventSessionId !== flatSessionId) {
+      return;
+    }
+    const p = params as {
+      type?: string;
+      args?: Array<{
+        description?: string;
+        value?: unknown;
+        type?: string;
+        preview?: { description?: string };
+      }>;
+      timestamp?: number;
+    };
+    onEntry({
+      type: p.type ?? "log",
+      argsPreview: (p.args ?? []).map(previewConsoleArg),
+      timestamp: p.timestamp,
+    });
+  };
+
+  try {
+    flatSessionId = await attachToTargetSession(cdp, targetId);
+    await cdp.send("Runtime.enable", {}, flatSessionId);
+    await abortPromise;
+    return {};
+  } catch (e) {
+    if (signal.aborted) return {};
+    return { error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    closeWs();
+  }
+}
+
 /** 导航到 URL 并等待 `Page.loadEventFired`。 */
 export async function openTargetUrl(
   cdpPort: number,

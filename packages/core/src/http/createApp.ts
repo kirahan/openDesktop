@@ -7,6 +7,11 @@ import { API_VERSION, PACKAGE_VERSION } from "../constants.js";
 import type { SessionManager } from "../session/manager.js";
 import type { JsonFileStore } from "../store/jsonStore.js";
 import type { AppDefinition, ProfileDefinition } from "../store/types.js";
+import { runConsoleMessageStream } from "../cdp/browserClient.js";
+import {
+  releaseConsoleStream,
+  tryAcquireConsoleStream,
+} from "../cdp/consoleStreamLimiter.js";
 import { listAgentActionNamesForVersion } from "./agentActionAliases.js";
 import { registerObservabilityRoutes } from "./registerObservability.js";
 
@@ -90,6 +95,7 @@ export function createApp(deps: AppDeps): CreateAppResult {
       "topology",
       "metrics",
       "logs_export",
+      "live_console",
       ...(config.enableAgentApi ? (["agent", "snapshot"] as const) : []),
       ...(config.enableExtendedLogFields ? (["extended_logs"] as const) : []),
     ];
@@ -197,6 +203,58 @@ export function createApp(deps: AppDeps): CreateAppResult {
     config,
     manager,
     dataDir: config.dataDir,
+  });
+
+  v1.get("/sessions/:sessionId/console/stream", async (req, res) => {
+    const q = req.query.targetId;
+    const targetId = typeof q === "string" ? q.trim() : "";
+    if (!targetId) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "targetId query parameter required");
+    }
+
+    const sessionId = req.params.sessionId;
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (ctx.state !== "running" || !ctx.cdpPort) {
+      return jsonError(res, 503, "CDP_NOT_READY", "Session has no active CDP endpoint");
+    }
+
+    if (!tryAcquireConsoleStream()) {
+      return jsonError(res, 429, "CONSOLE_STREAM_LIMIT", "Too many concurrent console streams");
+    }
+
+    const ac = new AbortController();
+    const onClose = (): void => {
+      ac.abort();
+    };
+    req.on("close", onClose);
+
+    try {
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+
+      const payload = {
+        sessionId,
+        targetId,
+        note: "events are CDP Runtime.consoleAPICalled after subscribe; no history",
+      };
+      res.write(`event: ready\ndata: ${JSON.stringify(payload)}\n\n`);
+
+      const result = await runConsoleMessageStream(ctx.cdpPort, targetId, (entry) => {
+        if (res.writableEnded) return;
+        res.write(`data: ${JSON.stringify(entry)}\n\n`);
+      }, ac.signal);
+
+      if (result.error && !res.writableEnded) {
+        res.write(`event: error\ndata: ${JSON.stringify({ message: result.error })}\n\n`);
+      }
+      if (!res.writableEnded) res.end();
+    } finally {
+      req.removeListener("close", onClose);
+      releaseConsoleStream();
+    }
   });
 
   v1.get("/sessions/:id/logs/stream", (req, res) => {

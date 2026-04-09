@@ -98,6 +98,7 @@
 
 - **窗口列表 / 指标 / 日志导出**：`GET /v1/sessions/:id/list-window|metrics`（`/topology` 为兼容别名），`GET .../logs/export`。
 - **Agent 面**：`GET /v1/agent/sessions/:id/snapshot`，`POST .../actions`（含截图、`eval`、`renderer-globals` 全局枚举等，受 Profile `allowScriptExecution` 与限流约束）；CLI 与 `list-window` 同为 App-first：`yarn oc <appId> list-global --target <targetId>`（不写 session id 时自动选该应用下活跃会话）。
+- **实时控制台（SSE）**：`GET /v1/sessions/:id/console/stream?targetId=` 推送 `Runtime.consoleAPICalled`（仅订阅后的新日志）；与 Agent `console-messages` 短时采样并存；**不含 Network**。
 - **版本能力位**：`GET /v1/version` 含 `capabilities`。
 - **配置**：`OPENDESKTOP_AGENT_API`、`OPENDESKTOP_EXTENDED_LOGS`、`OPENDESKTOP_AGENT_RPM`。
 

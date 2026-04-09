@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resetConsoleStreamCountForTest, tryAcquireConsoleStream } from "../cdp/consoleStreamLimiter.js";
 import { loadConfig } from "../config.js";
 import { createApp } from "./createApp.js";
 import { SessionManager } from "../session/manager.js";
@@ -30,6 +31,7 @@ describe("createApp HTTP", () => {
     expect(Array.isArray(v.body.capabilities)).toBe(true);
     expect(v.body.capabilities).toContain("list-window");
     expect(v.body.capabilities).toContain("topology");
+    expect(v.body.capabilities).toContain("live_console");
     expect(Array.isArray(v.body.agentActions)).toBe(true);
     expect(v.body.agentActions).toContain("state");
     expect(v.body.agentActions).toContain("get");
@@ -104,6 +106,79 @@ describe("createApp HTTP", () => {
     const { app } = createApp({ config, token: "tok", store, manager });
     const res = await request(app).get("/v1/agent/sessions/nope/snapshot");
     expect(res.status).toBe(401);
+  });
+
+  it("GET /v1/sessions/:id/console/stream returns 404 when session missing", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const res = await request(app)
+      .get("/v1/sessions/missing-id/console/stream?targetId=T1")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("SESSION_NOT_FOUND");
+  });
+
+  it("GET /v1/sessions/:id/console/stream requires targetId", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const res = await request(app)
+      .get("/v1/sessions/any/console/stream")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("GET /v1/sessions/:id/console/stream returns 503 when CDP not ready", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const spy = vi.spyOn(manager, "getOpsContext");
+    spy.mockReturnValue({
+      state: "running",
+      cdpPort: undefined,
+      pid: 1,
+      allowScriptExecution: false,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/console/stream?targetId=T1")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("CDP_NOT_READY");
+    spy.mockRestore();
+  });
+
+  it("GET /v1/sessions/:id/console/stream returns 429 when stream limit exceeded", async () => {
+    resetConsoleStreamCountForTest();
+    for (let i = 0; i < 8; i++) {
+      expect(tryAcquireConsoleStream()).toBe(true);
+    }
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const spy = vi.spyOn(manager, "getOpsContext");
+    spy.mockReturnValue({
+      state: "running",
+      cdpPort: 9222,
+      pid: 1,
+      allowScriptExecution: false,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/console/stream?targetId=T1")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(429);
+    expect(res.body.error.code).toBe("CONSOLE_STREAM_LIMIT");
+    spy.mockRestore();
+    resetConsoleStreamCountForTest();
   });
 
   it("GET /v1/sessions/:id/logs/stream returns 404 when session missing", async () => {

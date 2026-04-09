@@ -26,4 +26,3 @@
 - **代码**：`packages/core` 中 `cdp/browserClient.ts`（或邻近模块）、`http/registerObservability.ts`、`http/agentActionAliases.ts`；可选 `cli.ts` 新增子命令；`createApp` / version 聚合处若需列出新动词。
 - **测试**：`@jest-runner/electron/main` 或现有 HTTP mock CDP 模式的对应用例；纯函数逻辑可单测。
 - **文档**：根 `README.md` Agent 动词表；必要时 `docs/PRODUCT.md` 一句。
-
