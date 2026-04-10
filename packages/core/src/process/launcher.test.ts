@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { launchDebuggedApp } from "./launcher.js";
+import { killExistingProcessesForExecutable, launchDebuggedApp } from "./launcher.js";
 import type { AppDefinition, ProfileDefinition } from "../store/types.js";
 
 describe("launchDebuggedApp", () => {
@@ -28,5 +28,15 @@ describe("launchDebuggedApp", () => {
       child.on("error", reject);
     });
     expect(out.join("")).toContain("launcher-ok");
+  });
+});
+
+describe("killExistingProcessesForExecutable", () => {
+  it("resolves when no process matches the executable path", async () => {
+    const fake =
+      process.platform === "win32"
+        ? "C:\\nope-open-desktop-kill-test-9999\\fake.exe"
+        : "/tmp/nope-open-desktop-kill-test-9999-fake-bin";
+    await expect(killExistingProcessesForExecutable(fake)).resolves.toBeUndefined();
   });
 });

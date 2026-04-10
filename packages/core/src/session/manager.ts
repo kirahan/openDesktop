@@ -1,5 +1,5 @@
 import type { ChildProcess } from "node:child_process";
-import { launchDebuggedApp } from "../process/launcher.js";
+import { killExistingProcessesForExecutable, launchDebuggedApp } from "../process/launcher.js";
 import type { JsonFileStore } from "../store/jsonStore.js";
 import type { AppDefinition } from "../store/types.js";
 import { appendAudit } from "../audit.js";
@@ -154,6 +154,9 @@ export class SessionManager {
 
     let launched;
     try {
+      if (app.injectElectronDebugPort) {
+        await killExistingProcessesForExecutable(app.executable);
+      }
       launched = launchDebuggedApp(app, profile, cdpPort, proxyEnv);
     } catch (e) {
       assertTransition(s.state, "failed");
