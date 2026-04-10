@@ -120,7 +120,7 @@ yarn od -- doctor --app demo-mock
 
 ### 按应用用户脚本（UserScript 元数据存储）
 
-将油猴风格 **`// ==UserScript==` … `// ==/UserScript==`** 块写入 Core，按 **`appId`** 归属持久化（文件：`<dataDir>/user-scripts.json`）。解析后的 **`metadata.matches`** 为 **`@match` 原文列表**。**当前版本不根据 `@match` 做 URL 过滤、不自动注入页面**（仅存储，避免与 SPA 客户端路由语义混淆；后续若做「按地址自动执行」需单独设计；行为见 `openspec/specs/app-user-scripts/spec.md`，历史设计见 `openspec/changes/archive/2026-04-10-app-user-scripts-metadata/design.md`）。
+将油猴风格 **`// ==UserScript==` … `// ==/UserScript==`** 块写入 Core，按 **`appId`** 归属持久化（文件：`<dataDir>/user-scripts.json`）。解析后的 **`metadata.matches`** 为 **`@match` 原文列表**。**`@match` 不参与是否注入、注入到哪些 CDP target 的决策**（避免与 SPA 客户端路由语义混淆；规格见 `openspec/specs/app-user-scripts/spec.md`）。**不会在后台自动执行脚本**：需在会话 **`running`** 且允许脚本执行时，**显式调用**下方「注入」接口，将当前 app 下全部脚本 **正文** 注入到 **当时 CDP 枚举到的全部 `page` 类型 target**（同一脚本可能在多个 frame target 上各执行一次）。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -129,6 +129,7 @@ yarn od -- doctor --app demo-mock
 | `GET` | `/v1/apps/:appId/user-scripts/:scriptId` | 单条 |
 | `PATCH` | `/v1/apps/:appId/user-scripts/:scriptId` | Body：`{ "source": "..." }` |
 | `DELETE` | `/v1/apps/:appId/user-scripts/:scriptId` | 成功 **204** |
+| `POST` | `/v1/sessions/:sessionId/user-scripts/inject` | **显式注入**（Bearer）：将该会话 Profile 所属 `appId` 下全部脚本正文注入全部 `page` target；需 **`allowScriptExecution: true`**；响应含 `injectedScripts`、`targets`、`errors[]` |
 
 **`@grant`** 仅允许 **`none`**（或可省略）；否则返回 **`USER_SCRIPT_GRANT_NOT_SUPPORTED`**。缺少 **`@name`** 返回 **`USER_SCRIPT_VALIDATION_ERROR`**。均需 **Bearer**。
 
@@ -137,7 +138,7 @@ yarn od -- doctor --app demo-mock
 - Core **默认只监听 127.0.0.1**，请勿在未配置防火墙时绑定 `0.0.0.0`。
 - `/v1/sessions/:id/cdp/`* 为调试流量，**不强制 Bearer**，以便 DevTools / CDP 客户端；依赖 **仅本机回环** 与上游会话隔离。
 - **CDP 等效高权限**：可执行页面脚本与访问调试协议，勿向公网暴露。
-- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close`、`renderer-globals`、`runtime-exception` 等）需会话侧 **`allowScriptExecution: true`**（**`POST /v1/profiles` 新建 Profile 时默认 `true`**；旧数据或未迁移会话仍可能为 `false`，可显式传 `allowScriptExecution: false` 关闭）。只读类（如 `state`、`get`、`explore`、`screenshot`、`network`、`network-observe`、`console-messages`、`window-state`）以及仅 `ms`、不含 `selector` 的 `wait`、以及窗口前置 `focus-window` 不需要。
+- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close`、`renderer-globals`、`runtime-exception`、**`POST .../user-scripts/inject`** 等）需会话侧 **`allowScriptExecution: true`**（**`POST /v1/profiles` 新建 Profile 时默认 `true`**；旧数据或未迁移会话仍可能为 `false`，可显式传 `allowScriptExecution: false` 关闭）。只读类（如 `state`、`get`、`explore`、`screenshot`、`network`、`network-observe`、`console-messages`、`window-state`）以及仅 `ms`、不含 `selector` 的 `wait`、以及窗口前置 `focus-window` 不需要。
 
 ## 语义层与可观测 API（Bearer）
 

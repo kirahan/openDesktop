@@ -26,7 +26,12 @@ import {
 } from "../cdp/runtimeExceptionStream.js";
 import { listAgentActionNamesForVersion } from "./agentActionAliases.js";
 import { registerObservabilityRoutes } from "./registerObservability.js";
+import {
+  injectUserScriptsIntoPageTargets,
+  type UserScriptInjectResult,
+} from "../cdp/injectUserScripts.js";
 import { parseUserScriptSource } from "../userScripts/parseUserScriptMetadata.js";
+import { collectScriptBodiesForApp } from "../userScripts/collectScriptBodiesForApp.js";
 import type { UserScriptRecord } from "../userScripts/types.js";
 
 export interface AppDeps {
@@ -312,6 +317,45 @@ export function createApp(deps: AppDeps): CreateAppResult {
     const s = await manager.stop(req.params.id);
     if (!s) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
     res.json({ session: s });
+  });
+
+  /** 显式将 Profile 所属 app 的用户脚本正文注入当前 CDP 全部 `page` target（不参考 @match）。 */
+  v1.post("/sessions/:sessionId/user-scripts/inject", async (req, res) => {
+    const sessionId = req.params.sessionId;
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (!ctx.allowScriptExecution) {
+      return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+    }
+    if (ctx.state !== "running" || ctx.cdpPort === undefined) {
+      return jsonError(res, 503, "CDP_NOT_READY", "Session has no active CDP endpoint");
+    }
+
+    const session = manager.get(sessionId);
+    if (!session) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    const { profiles } = await store.readProfiles();
+    const profile = profiles.find((p) => p.id === session.profileId);
+    if (!profile) {
+      return jsonError(res, 500, "PROFILE_NOT_FOUND", "Session profile not found in store");
+    }
+
+    const bodies = await collectScriptBodiesForApp(store, profile.appId);
+    if (bodies.length === 0) {
+      return res.status(200).json({ injectedScripts: 0, targets: 0, errors: [] });
+    }
+
+    const result: UserScriptInjectResult = await injectUserScriptsIntoPageTargets(
+      ctx.cdpPort,
+      bodies,
+    );
+    if ("error" in result) {
+      return jsonError(res, 503, "CDP_NOT_READY", result.error);
+    }
+    return res.status(200).json({
+      injectedScripts: result.injectedScripts,
+      targets: result.targets,
+      errors: result.errors,
+    });
   });
 
   registerObservabilityRoutes(v1, {

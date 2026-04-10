@@ -2280,6 +2280,10 @@ export function App() {
   const [detailSnap, setDetailSnap] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState<DetailKind | null>(null);
   const [cdpCopiedId, setCdpCopiedId] = useState<string | null>(null);
+  /** 会话 ID → 注入用户脚本中 */
+  const [userScriptInjectBusy, setUserScriptInjectBusy] = useState<string | null>(null);
+  /** 会话 ID → 注入结果摘要或错误文案 */
+  const [userScriptInjectHint, setUserScriptInjectHint] = useState<Record<string, string>>({});
 
   const apiRoot = resolveApiRoot(base);
   const sessionsUrl = apiRoot ? `${apiRoot}/v1/sessions` : "/v1/sessions";
@@ -2421,6 +2425,55 @@ export function App() {
     window.setTimeout(() => {
       setCdpCopiedId((cur) => (cur === sessionId ? null : cur));
     }, 2000);
+  }
+
+  async function injectUserScriptsForSession(sessionId: string) {
+    if (!tokenTrimmed) {
+      setUserScriptInjectHint((h) => ({ ...h, [sessionId]: "请先填写 Token" }));
+      return;
+    }
+    setUserScriptInjectBusy(sessionId);
+    setUserScriptInjectHint((h) => ({ ...h, [sessionId]: "" }));
+    try {
+      const res = await fetch(
+        apiUrl(`/v1/sessions/${encodeURIComponent(sessionId)}/user-scripts/inject`),
+        { method: "POST", headers },
+      );
+      const raw = await res.text();
+      let parsed: {
+        injectedScripts?: number;
+        targets?: number;
+        errors?: unknown[];
+        error?: { code?: string; message?: string };
+      };
+      try {
+        parsed = JSON.parse(raw) as typeof parsed;
+      } catch {
+        throw new Error(raw.slice(0, 200));
+      }
+      if (!res.ok) {
+        const msg =
+          parsed.error?.message ?? parsed.error?.code ?? `HTTP ${res.status}: ${raw.slice(0, 200)}`;
+        throw new Error(msg);
+      }
+      const inj = parsed.injectedScripts ?? 0;
+      const tg = parsed.targets ?? 0;
+      const errN = Array.isArray(parsed.errors) ? parsed.errors.length : 0;
+      setUserScriptInjectHint((h) => ({
+        ...h,
+        [sessionId]:
+          errN > 0
+            ? `已执行 ${inj} 次 / ${tg} 个 page target，${errN} 条错误（详情见 API 响应）`
+            : `已注入 ${inj} 次 / ${tg} 个 page target（@match 不参与；多 frame 可能重复）`,
+      }));
+    } catch (e) {
+      setUserScriptInjectHint((h) => ({
+        ...h,
+        [sessionId]: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setUserScriptInjectBusy(null);
+    }
   }
 
   async function startSessionForApp(appId: string) {
@@ -3116,7 +3169,7 @@ export function App() {
                                 <button
                                   type="button"
                                   disabled={busy || !tokenTrimmed}
-                                  title="按应用保存 UserScript 元数据；@match 仅存不用，不自动注入页面"
+                                  title="按应用保存 UserScript；@match 不参与注入决策。运行中会话请在列表「注入用户脚本」显式注入"
                                   onClick={() => openUserScriptsModal(a.id)}
                                   style={{
                                     display: "inline-flex",
@@ -3365,6 +3418,43 @@ export function App() {
                   >
                     经 Core 代理；裸端口见上（仅本机子进程）
                   </div>
+                  {(s.state || "").toLowerCase() === "running" && (
+                    <div style={{ marginTop: 8 }}>
+                      <button
+                        type="button"
+                        title="将该 Profile 所属 app 的用户脚本正文注入当前 CDP 全部 page target（需 allowScriptExecution）"
+                        disabled={userScriptInjectBusy === s.id}
+                        onClick={() => void injectUserScriptsForSession(s.id)}
+                        style={{
+                          fontSize: 11,
+                          padding: "4px 8px",
+                          borderRadius: 6,
+                          border: `1px solid ${OBS_PALETTE.borderActive}`,
+                          background: userScriptInjectBusy === s.id ? "#f1f5f9" : "#fff7ed",
+                          color: "#9a3412",
+                          cursor: userScriptInjectBusy === s.id ? "wait" : "pointer",
+                          maxWidth: "100%",
+                        }}
+                      >
+                        {userScriptInjectBusy === s.id ? "注入中…" : "注入用户脚本"}
+                      </button>
+                      {userScriptInjectHint[s.id] ? (
+                        <div
+                          style={{
+                            marginTop: 4,
+                            fontSize: 10,
+                            color: userScriptInjectHint[s.id].includes("已注入") || userScriptInjectHint[s.id].includes("已执行")
+                              ? "#15803d"
+                              : "#b91c1c",
+                            lineHeight: 1.35,
+                            wordBreak: "break-word",
+                          }}
+                        >
+                          {userScriptInjectHint[s.id]}
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
                 </td>
                 <td
                   style={{
