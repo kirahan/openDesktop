@@ -1,0 +1,12 @@
+Third-party UI reference
+--------------------------
+
+The OpenDesktop web console "Network" view layout and interaction patterns are
+inspired by Whistle (https://github.com/avwo/whistle), Copyright (c) 2015 avwo.
+
+Whistle is licensed under the MIT License. A copy of the MIT License is
+included in the Whistle repository at:
+https://github.com/avwo/whistle/blob/master/LICENSE
+
+OpenDesktop does not distribute Whistle as a bundled dependency; the
+implementation is original code in this repository.

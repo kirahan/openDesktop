@@ -1,4 +1,7 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { NetworkView } from "./network/NetworkView.js";
+import { requestCompleteToRow } from "./network/sseToRow.js";
+import type { NetworkRequestRow } from "./network/types.js";
 
 type DetailKind = "list-window" | "metrics" | "snapshot";
 
@@ -638,6 +641,8 @@ type LiveConsoleTabState = {
   streamKind: ObservabilityStreamKind;
   label: string;
   lines: string[];
+  /** `streamKind === "network"` 时：SSE `requestComplete` 累积行 */
+  networkRows?: NetworkRequestRow[];
   running: boolean;
   err: string | null;
 };
@@ -673,6 +678,8 @@ function LiveConsoleDockLayout({
   const [activeId, setActiveId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const abortMap = useRef<Map<string, AbortController>>(new Map());
+  const tabsRef = useRef<LiveConsoleTabState[]>([]);
+  tabsRef.current = tabs;
 
   useEffect(() => {
     if (!drawerOpen) return;
@@ -683,31 +690,6 @@ function LiveConsoleDockLayout({
     return () => window.removeEventListener("keydown", onKey);
   }, [drawerOpen]);
 
-  const openLiveTab = useCallback((p: OpenLiveTabParams) => {
-    const streamKind = p.streamKind ?? "console";
-    const id = `${p.sessionId}::${p.targetId}::${streamKind}`;
-    const title = (p.label.slice(0, 28) || p.targetId.slice(0, 10)).trim();
-    const tabLabel = `${title} · ${observabilityStreamKindLabel(streamKind)}`;
-    setTabs((prev) => {
-      if (prev.some((t) => t.id === id)) return prev;
-      return [
-        ...prev,
-        {
-          id,
-          sessionId: p.sessionId,
-          targetId: p.targetId,
-          streamKind,
-          label: tabLabel,
-          lines: [],
-          running: false,
-          err: null,
-        },
-      ];
-    });
-    setActiveId(id);
-    setDrawerOpen(true);
-  }, []);
-
   const stopStream = useCallback((tabId: string) => {
     abortMap.current.get(tabId)?.abort();
     abortMap.current.delete(tabId);
@@ -715,7 +697,17 @@ function LiveConsoleDockLayout({
   }, []);
 
   const clearTabLines = useCallback((tabId: string) => {
-    setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, lines: [] } : t)));
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === tabId
+          ? {
+              ...t,
+              lines: [],
+              networkRows: t.streamKind === "network" ? [] : t.networkRows,
+            }
+          : t,
+      ),
+    );
   }, []);
 
   const closeTab = useCallback(
@@ -833,9 +825,14 @@ function LiveConsoleDockLayout({
                   requestId?: string;
                 };
                 if (o.kind === "requestComplete") {
-                  const st = o.status !== undefined ? ` ${o.status}` : "";
-                  pushLine(
-                    `[HTTP] ${o.method ?? "?"} ${o.url ?? ""}${st} · ${Math.round(o.durationMs ?? 0)}ms · ${o.requestId ?? ""}`,
+                  const row = requestCompleteToRow(o);
+                  setTabs((prev) =>
+                    prev.map((t) => {
+                      if (t.id !== tabId) return t;
+                      const prevRows = t.networkRows ?? [];
+                      const nextRows = [...prevRows, row].slice(-500);
+                      return { ...t, networkRows: nextRows };
+                    }),
                   );
                 } else {
                   pushLine(`[network] ${raw.slice(0, 400)}`);
@@ -885,10 +882,44 @@ function LiveConsoleDockLayout({
     [apiRoot, token, stopStream],
   );
 
+  const openLiveTab = useCallback(
+    (p: OpenLiveTabParams) => {
+      const streamKind = p.streamKind ?? "console";
+      const id = `${p.sessionId}::${p.targetId}::${streamKind}`;
+      const title = (p.label.slice(0, 28) || p.targetId.slice(0, 10)).trim();
+      const tabLabel = `${title} · ${observabilityStreamKindLabel(streamKind)}`;
+      const existed = tabsRef.current.some((t) => t.id === id);
+      setTabs((prev) => {
+        if (prev.some((t) => t.id === id)) return prev;
+        return [
+          ...prev,
+          {
+            id,
+            sessionId: p.sessionId,
+            targetId: p.targetId,
+            streamKind,
+            label: tabLabel,
+            lines: [],
+            networkRows: streamKind === "network" ? [] : undefined,
+            running: false,
+            err: null,
+          },
+        ];
+      });
+      setActiveId(id);
+      setDrawerOpen(true);
+      if (!existed && streamKind === "network") {
+        window.setTimeout(() => void startStream(id, p.sessionId, p.targetId, "network"), 0);
+      }
+    },
+    [startStream],
+  );
+
   const ctxValue = useMemo(() => ({ openLiveTab }), [openLiveTab]);
 
   const active = tabs.find((t) => t.id === activeId) ?? null;
   const tokenOk = token.trim().length > 0;
+  const drawerWide = active?.streamKind === "network";
 
   return (
     <LiveConsoleDockContext.Provider value={ctxValue}>
@@ -942,7 +973,7 @@ function LiveConsoleDockLayout({
           right: 0,
           top: 0,
           bottom: 0,
-          width: "min(340px, 100vw)",
+          width: drawerWide ? "min(960px, 96vw)" : "min(340px, 100vw)",
           zIndex: 1050,
           display: "flex",
           flexDirection: "column",
@@ -954,7 +985,7 @@ function LiveConsoleDockLayout({
           boxShadow: "-4px 0 24px rgba(15,23,42,0.12)",
           overflow: "hidden",
           transform: drawerOpen ? "translateX(0)" : "translateX(100%)",
-          transition: "transform 0.22s ease-out",
+          transition: "transform 0.22s ease-out, width 0.2s ease-out",
           pointerEvents: drawerOpen ? "auto" : "none",
         }}
       >
@@ -1090,27 +1121,54 @@ function LiveConsoleDockLayout({
                   {active.err && (
                     <div style={{ fontSize: 11, color: "#991b1b", lineHeight: 1.4 }}>{active.err}</div>
                   )}
-                  {active.lines.length > 0 && (
-                    <pre
-                      style={{
-                        margin: 0,
-                        flex: 1,
-                        minHeight: 160,
-                        maxHeight: "min(420px, 55vh)",
-                        overflow: "auto",
-                        padding: 8,
-                        fontSize: 10,
-                        lineHeight: 1.4,
-                        background: "#0f172a",
-                        color: "#e2e8f0",
-                        borderRadius: 6,
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
-                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                      }}
-                    >
-                      {active.lines.join("\n")}
-                    </pre>
+                  {active.streamKind === "network" ? (
+                    <>
+                      <NetworkView rows={active.networkRows ?? []} />
+                      {active.lines.length > 0 && (
+                        <pre
+                          style={{
+                            margin: 0,
+                            flexShrink: 0,
+                            maxHeight: 120,
+                            overflow: "auto",
+                            padding: 8,
+                            fontSize: 10,
+                            lineHeight: 1.4,
+                            background: "#1e293b",
+                            color: "#fde68a",
+                            borderRadius: 6,
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                          }}
+                        >
+                          {active.lines.join("\n")}
+                        </pre>
+                      )}
+                    </>
+                  ) : (
+                    active.lines.length > 0 && (
+                      <pre
+                        style={{
+                          margin: 0,
+                          flex: 1,
+                          minHeight: 160,
+                          maxHeight: "min(420px, 55vh)",
+                          overflow: "auto",
+                          padding: 8,
+                          fontSize: 10,
+                          lineHeight: 1.4,
+                          background: "#0f172a",
+                          color: "#e2e8f0",
+                          borderRadius: 6,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                        }}
+                      >
+                        {active.lines.join("\n")}
+                      </pre>
+                    )
                   )}
                 </div>
               )}
