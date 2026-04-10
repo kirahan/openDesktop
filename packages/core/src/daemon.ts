@@ -19,7 +19,7 @@ export async function startDaemon(overrides: Partial<CoreConfig> = {}): Promise<
   const store = new JsonFileStore(config.dataDir);
   await store.ensureDir();
   const token = await readOrCreateToken(config.tokenFile);
-  const manager = new SessionManager(store, config.dataDir);
+  const manager = new SessionManager(store, config.dataDir, { host: config.host, port: config.port });
   const { app, cdpProxy } = createApp({ config, token, store, manager });
 
   const server = http.createServer(app);

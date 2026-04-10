@@ -71,7 +71,8 @@ export function NetworkView({ rows }: NetworkViewProps) {
                   <th style={{ width: 36 }}>#</th>
                   <th style={{ width: 44 }}>Result</th>
                   <th style={{ width: 52 }}>Method</th>
-                  <th style={{ width: "20%" }}>Host</th>
+                  <th style={{ width: 48 }}>Src</th>
+                  <th style={{ width: "18%" }}>Host</th>
                   <th style={{ width: "auto" }}>URL</th>
                   <th style={{ width: 56 }}>Type</th>
                   <th style={{ width: 52 }}>ms</th>
@@ -80,7 +81,7 @@ export function NetworkView({ rows }: NetworkViewProps) {
               <tbody>
                 {visible.length === 0 ? (
                   <tr>
-                    <td colSpan={7} style={{ padding: 16, color: "#64748b", textAlign: "center" }}>
+                    <td colSpan={8} style={{ padding: 16, color: "#64748b", textAlign: "center" }}>
                       暂无请求行；订阅建立后仅展示<strong>新完成</strong>的请求（与 Core SSE 一致）。
                     </td>
                   </tr>
@@ -97,6 +98,9 @@ export function NetworkView({ rows }: NetworkViewProps) {
                       <td>{i + 1}</td>
                       <td>{r.status || "—"}</td>
                       <td>{r.method}</td>
+                      <td title={r.source === "proxy" ? "本地转发代理" : "CDP"}>
+                        {r.source === "proxy" ? "proxy" : "cdp"}
+                      </td>
                       <td title={r.host}>{r.host}</td>
                       <td title={r.url}>{r.url}</td>
                       <td>{r.type}</td>
@@ -159,6 +163,14 @@ export function NetworkView({ rows }: NetworkViewProps) {
                   <tr>
                     <th scope="row">Method</th>
                     <td>{selected.method}</td>
+                  </tr>
+                  <tr>
+                    <th scope="row">Source</th>
+                    <td>{selected.source ?? "—"}</td>
+                  </tr>
+                  <tr>
+                    <th scope="row">TLS tunnel</th>
+                    <td>{selected.tlsTunnel === true ? "yes (CONNECT, no MITM)" : "no"}</td>
                   </tr>
                   <tr>
                     <th scope="row">Status</th>

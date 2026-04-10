@@ -1,3 +1,5 @@
+import type { LocalProxyRule } from "../proxy/localProxyTypes.js";
+
 export const STORE_SCHEMA_VERSION = 1;
 
 export interface AppDefinition {
@@ -11,6 +13,13 @@ export interface AppDefinition {
   args: string[];
   /** When true, append --remote-debugging-port <cdpPort> (Electron-style) */
   injectElectronDebugPort: boolean;
+  /**
+   * 为 true 时：本会话启动子进程仅注入进程级 HTTP(S)_PROXY 指向 Core 拉起的本地转发代理（非系统全局代理）。
+   * @see packages/core/src/proxy/forwardProxyServer.ts
+   */
+  useDedicatedProxy?: boolean;
+  /** 可选：代理规则（host/path 标签）；未配置视为空数组 */
+  proxyRules?: LocalProxyRule[];
 }
 
 export interface ProfileDefinition {

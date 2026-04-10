@@ -1,6 +1,6 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { NetworkView } from "./network/NetworkView.js";
-import { requestCompleteToRow } from "./network/sseToRow.js";
+import { proxyRequestCompleteToRow, requestCompleteToRow } from "./network/sseToRow.js";
 import type { NetworkRequestRow } from "./network/types.js";
 
 type DetailKind = "list-window" | "metrics" | "snapshot";
@@ -35,6 +35,8 @@ type OdApp = {
   env: Record<string, string>;
   args: string[];
   injectElectronDebugPort: boolean;
+  /** 与会话启动时注入进程级 HTTP(S)_PROXY 对应（GET /v1/sessions/.../proxy/stream） */
+  useDedicatedProxy?: boolean;
 };
 
 /** GET /v1/profiles，用于选择 `yarn oc session create <profileId>` 等价参数 */
@@ -540,8 +542,11 @@ function pageInspectorBtnStyle(loading: boolean): React.CSSProperties {
   };
 }
 
-/** 右侧抽屉内 SSE 类型：与 Core `GET .../console|network|runtime-exception/stream` 对齐 */
-type ObservabilityStreamKind = "console" | "network" | "exception";
+/** 右侧抽屉内 SSE 类型：与 Core `GET .../console|network|runtime-exception|proxy/stream` 对齐 */
+type ObservabilityStreamKind = "console" | "network" | "exception" | "proxy";
+
+/** 本地代理流 tab 用的占位 targetId（非 CDP target） */
+const SESSION_PROXY_TARGET_ID = "__session_proxy__";
 
 function observabilityStreamKindLabel(k: ObservabilityStreamKind): string {
   switch (k) {
@@ -551,6 +556,8 @@ function observabilityStreamKindLabel(k: ObservabilityStreamKind): string {
       return "HTTPS";
     case "exception":
       return "异常";
+    case "proxy":
+      return "主进程代理";
     default:
       return k;
   }
@@ -565,6 +572,8 @@ function observabilityStartButtonLabel(kind: ObservabilityStreamKind, running: b
       return "开始 HTTPS 流";
     case "exception":
       return "开始异常栈流";
+    case "proxy":
+      return "开始主进程代理流";
     default:
       return "开始";
   }
@@ -578,6 +587,8 @@ function observabilityStreamHint(kind: ObservabilityStreamKind): string {
       return "SSE · 每条请求完成事件 · 限流时出现 [warning] · 无 body";
     case "exception":
       return "SSE · uncaught 异常与栈 · 须 Profile allowScriptExecution（否则 HTTP 403）";
+    case "proxy":
+      return "SSE · 本地转发代理 · HTTP 明文 + HTTPS CONNECT（不解密）· 须应用开启专用代理";
     default:
       return "";
   }
@@ -601,6 +612,9 @@ function buildObservabilitySseUrl(
     case "exception":
       path = `/v1/sessions/${sessionId}/runtime-exception/stream?targetId=${enc}`;
       break;
+    case "proxy":
+      path = `/v1/sessions/${sessionId}/proxy/stream`;
+      break;
   }
   return apiRoot ? `${apiRoot.replace(/\/$/, "")}${path}` : path;
 }
@@ -613,7 +627,7 @@ type LiveConsoleTabState = {
   streamKind: ObservabilityStreamKind;
   label: string;
   lines: string[];
-  /** `streamKind === "network"` 时：SSE `requestComplete` 累积行 */
+  /** `streamKind === "network" | "proxy"` 时：SSE 累积表格行 */
   networkRows?: NetworkRequestRow[];
   running: boolean;
   err: string | null;
@@ -675,7 +689,8 @@ function LiveConsoleDockLayout({
           ? {
               ...t,
               lines: [],
-              networkRows: t.streamKind === "network" ? [] : t.networkRows,
+              networkRows:
+                t.streamKind === "network" || t.streamKind === "proxy" ? [] : t.networkRows,
             }
           : t,
       ),
@@ -787,7 +802,7 @@ function LiveConsoleDockLayout({
                 pushLine(`[${entry.type ?? "log"}] ${(entry.argsPreview ?? []).join(" ")}`);
                 continue;
               }
-              if (streamKind === "network") {
+              if (streamKind === "network" || streamKind === "proxy") {
                 const o = JSON.parse(raw) as {
                   kind?: string;
                   method?: string;
@@ -795,9 +810,20 @@ function LiveConsoleDockLayout({
                   durationMs?: number;
                   status?: number;
                   requestId?: string;
+                  tlsTunnel?: boolean;
                 };
-                if (o.kind === "requestComplete") {
+                if (streamKind === "network" && o.kind === "requestComplete") {
                   const row = requestCompleteToRow(o);
+                  setTabs((prev) =>
+                    prev.map((t) => {
+                      if (t.id !== tabId) return t;
+                      const prevRows = t.networkRows ?? [];
+                      const nextRows = [...prevRows, row].slice(-500);
+                      return { ...t, networkRows: nextRows };
+                    }),
+                  );
+                } else if (streamKind === "proxy" && o.kind === "proxyRequestComplete") {
+                  const row = proxyRequestCompleteToRow(o);
                   setTabs((prev) =>
                     prev.map((t) => {
                       if (t.id !== tabId) return t;
@@ -872,7 +898,7 @@ function LiveConsoleDockLayout({
             streamKind,
             label: tabLabel,
             lines: [],
-            networkRows: streamKind === "network" ? [] : undefined,
+            networkRows: streamKind === "network" || streamKind === "proxy" ? [] : undefined,
             running: false,
             err: null,
           },
@@ -880,8 +906,11 @@ function LiveConsoleDockLayout({
       });
       setActiveId(id);
       setDrawerOpen(true);
-      if (!existed && streamKind === "network") {
-        window.setTimeout(() => void startStream(id, p.sessionId, p.targetId, "network"), 0);
+      if (!existed && (streamKind === "network" || streamKind === "proxy")) {
+        window.setTimeout(
+          () => void startStream(id, p.sessionId, p.targetId, streamKind),
+          0,
+        );
       }
     },
     [startStream],
@@ -891,7 +920,7 @@ function LiveConsoleDockLayout({
 
   const active = tabs.find((t) => t.id === activeId) ?? null;
   const tokenOk = token.trim().length > 0;
-  const drawerWide = active?.streamKind === "network";
+  const drawerWide = active?.streamKind === "network" || active?.streamKind === "proxy";
 
   return (
     <LiveConsoleDockContext.Provider value={ctxValue}>
@@ -1093,7 +1122,7 @@ function LiveConsoleDockLayout({
                   {active.err && (
                     <div style={{ fontSize: 11, color: "#991b1b", lineHeight: 1.4 }}>{active.err}</div>
                   )}
-                  {active.streamKind === "network" ? (
+                  {active.streamKind === "network" || active.streamKind === "proxy" ? (
                     <>
                       <NetworkView rows={active.networkRows ?? []} />
                       {active.lines.length > 0 && (
@@ -1509,6 +1538,21 @@ function PageTargetScreenshot({
                 title="须 allowScriptExecution；SSE：.../runtime-exception/stream"
               >
                 打开异常栈流
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  liveDock.openLiveTab({
+                    sessionId: ctx.sessionId,
+                    targetId: SESSION_PROXY_TARGET_ID,
+                    label: windowTitle,
+                    streamKind: "proxy",
+                  })
+                }
+                style={pageInspectorBtnStyle(false)}
+                title="SSE：GET /v1/sessions/.../proxy/stream（须应用开启「专用代理」并重启会话）"
+              >
+                打开主进程代理流
               </button>
             </div>
           </div>
@@ -2418,6 +2462,38 @@ export function App() {
     return apiRoot ? `${apiRoot}${path}` : path;
   }
 
+  async function patchAppUseDedicatedProxy(appId: string, useDedicatedProxy: boolean) {
+    if (!tokenTrimmed) return;
+    setAppBusyId(appId);
+    setAppActionMsg((m) => ({ ...m, [appId]: "" }));
+    try {
+      const res = await fetch(apiUrl(`/v1/apps/${encodeURIComponent(appId)}`), {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ useDedicatedProxy }),
+      });
+      const raw = await res.text();
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = JSON.parse(raw) as { error?: { message?: string } };
+          msg = j.error?.message ?? msg;
+        } catch {
+          msg = raw.slice(0, 160);
+        }
+        throw new Error(msg);
+      }
+      void refreshCoreData();
+    } catch (e) {
+      setAppActionMsg((m) => ({
+        ...m,
+        [appId]: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setAppBusyId(null);
+    }
+  }
+
   async function copyCdpGatewayForSession(sessionId: string) {
     const url = cdpGatewayHttpUrl(apiRoot ?? "", sessionId);
     await copyToClipboard(url);
@@ -2892,7 +2968,7 @@ export function App() {
                 >
                   <thead>
                     <tr>
-                      {["ID", "名称", "可执行文件", "工作目录", "CDP 注入", "启动参数", "操作"].map((h) => (
+                      {["ID", "名称", "可执行文件", "工作目录", "CDP 注入", "专用代理", "启动参数", "操作"].map((h) => (
                         <th
                           key={h}
                           style={{
@@ -2914,7 +2990,7 @@ export function App() {
                     {apps.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={7}
+                          colSpan={8}
                           style={{
                             padding: 20,
                             fontSize: 13,
@@ -3013,6 +3089,23 @@ export function App() {
                               <Badge tone={a.injectElectronDebugPort ? "green" : "slate"}>
                                 {a.injectElectronDebugPort ? "是" : "否"}
                               </Badge>
+                            </td>
+                            <td
+                              style={{
+                                padding: "12px 14px",
+                                borderBottom: `1px solid #f1f5f9`,
+                                verticalAlign: "middle",
+                              }}
+                            >
+                              <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: busy ? "not-allowed" : "pointer" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={a.useDedicatedProxy === true}
+                                  disabled={busy}
+                                  onChange={(e) => void patchAppUseDedicatedProxy(a.id, e.target.checked)}
+                                />
+                                <span style={{ fontSize: 11, color: "#475569" }}>启动注入</span>
+                              </label>
                             </td>
                             <td
                               title={argsStr}

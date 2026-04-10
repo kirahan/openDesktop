@@ -7,11 +7,19 @@ import { pickFreePort } from "../net/pickPort.js";
 import { assertTransition, canTransition } from "./fsm.js";
 import type { LogLine, SessionRecord } from "./types.js";
 import { waitForCdpReady } from "./waitCdp.js";
+import {
+  buildDefaultNoProxy,
+  parseFixedLocalProxyPortFromEnv,
+  startLocalForwardProxy,
+} from "../proxy/forwardProxyServer.js";
+import type { ProxyRequestCompleteEvent } from "../proxy/localProxyTypes.js";
 
 type Internal = SessionRecord & {
   child?: ChildProcess;
   logs: LogLine[];
   logSubscribers: Set<(line: LogLine) => void>;
+  proxySubscribers?: Set<(ev: ProxyRequestCompleteEvent) => void>;
+  localProxyClose?: () => Promise<void>;
 };
 
 export class SessionManager {
@@ -20,6 +28,11 @@ export class SessionManager {
   constructor(
     private readonly store: JsonFileStore,
     private readonly dataDir: string,
+    /** Core HTTP 监听地址，用于 NO_PROXY 排除，避免子进程经代理访问 Core 形成回环 */
+    private readonly coreHttp: { host: string; port: number } = {
+      host: "127.0.0.1",
+      port: 8787,
+    },
   ) {}
 
   list(): SessionRecord[] {
@@ -32,7 +45,14 @@ export class SessionManager {
   }
 
   private publicRecord(s: Internal): SessionRecord {
-    const { logs: _l, logSubscribers: _s, child: _c, ...rest } = s;
+    const {
+      logs: _l,
+      logSubscribers: _s,
+      child: _c,
+      proxySubscribers: _p,
+      localProxyClose: _x,
+      ...rest
+    } = s;
     return rest;
   }
 
@@ -97,13 +117,58 @@ export class SessionManager {
     const cdpPort = await pickFreePort();
     s.cdpPort = cdpPort;
 
+    let localProxyClose: (() => Promise<void>) | undefined;
+    if (app.useDedicatedProxy) {
+      const rules = app.proxyRules ?? [];
+      s.proxySubscribers = new Set();
+      const subs = s.proxySubscribers;
+      try {
+        const fixedListen = parseFixedLocalProxyPortFromEnv();
+        const { port, close } = await startLocalForwardProxy({
+          rules,
+          listenPort: fixedListen,
+          onComplete: (ev) => {
+            for (const fn of subs) fn(ev);
+          },
+        });
+        s.localProxyPort = port;
+        localProxyClose = close;
+      } catch (e) {
+        assertTransition(s.state, "failed");
+        s.state = "failed";
+        s.error = e instanceof Error ? e.message : String(e);
+        return;
+      }
+    }
+
+    const proxyEnv =
+      s.localProxyPort !== undefined
+        ? {
+            httpProxyUrl: `http://127.0.0.1:${s.localProxyPort}`,
+            httpsProxyUrl: `http://127.0.0.1:${s.localProxyPort}`,
+            noProxy: buildDefaultNoProxy(this.coreHttp.host, this.coreHttp.port),
+          }
+        : undefined;
+
+    s.localProxyClose = localProxyClose;
+
     let launched;
     try {
-      launched = launchDebuggedApp(app, profile, cdpPort);
+      launched = launchDebuggedApp(app, profile, cdpPort, proxyEnv);
     } catch (e) {
       assertTransition(s.state, "failed");
       s.state = "failed";
       s.error = e instanceof Error ? e.message : String(e);
+      if (localProxyClose) {
+        try {
+          await localProxyClose();
+        } catch {
+          /* noop */
+        }
+      }
+      s.localProxyPort = undefined;
+      s.proxySubscribers = undefined;
+      s.localProxyClose = undefined;
       return;
     }
 
@@ -138,6 +203,16 @@ export class SessionManager {
       } catch {
         /* ignore */
       }
+      if (localProxyClose) {
+        try {
+          await localProxyClose();
+        } catch {
+          /* noop */
+        }
+      }
+      s.localProxyPort = undefined;
+      s.proxySubscribers = undefined;
+      s.localProxyClose = undefined;
       return;
     }
 
@@ -165,6 +240,12 @@ export class SessionManager {
     } catch {
       /* ignore */
     }
+    if (s.localProxyClose) {
+      void s.localProxyClose().catch(() => undefined);
+    }
+    s.localProxyPort = undefined;
+    s.proxySubscribers = undefined;
+    s.localProxyClose = undefined;
     s.state = "killed";
     s.error = s.error ?? "stopped by user";
     await appendAudit(this.dataDir, { type: "session.stop", sessionId: id });
@@ -178,6 +259,17 @@ export class SessionManager {
     return () => s.logSubscribers.delete(fn);
   }
 
+  /** 订阅本地转发代理产生的请求完成事件（仅 useDedicatedProxy 会话有数据） */
+  subscribeProxyNetwork(
+    sessionId: string,
+    fn: (ev: ProxyRequestCompleteEvent) => void,
+  ): (() => void) | undefined {
+    const s = this.sessions.get(sessionId);
+    if (!s?.proxySubscribers) return undefined;
+    s.proxySubscribers.add(fn);
+    return () => s.proxySubscribers?.delete(fn);
+  }
+
   getLogs(sessionId: string): LogLine[] {
     return [...(this.sessions.get(sessionId)?.logs ?? [])];
   }
@@ -189,6 +281,7 @@ export class SessionManager {
     | {
         state: SessionRecord["state"];
         cdpPort?: number;
+        localProxyPort?: number;
         pid?: number;
         allowScriptExecution: boolean;
       }
@@ -198,6 +291,7 @@ export class SessionManager {
     return {
       state: s.state,
       cdpPort: s.cdpPort,
+      localProxyPort: s.localProxyPort,
       pid: s.pid,
       allowScriptExecution: s.allowScriptExecution ?? true,
     };

@@ -8,6 +8,8 @@ export interface SessionRecord {
   profileId: string;
   state: SessionState;
   cdpPort?: number;
+  /** 本会话为 useDedicatedProxy 应用启动的本地转发代理端口（127.0.0.1） */
+  localProxyPort?: number;
   pid?: number;
   error?: string;
   createdAt: string;

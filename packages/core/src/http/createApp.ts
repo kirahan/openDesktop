@@ -123,10 +123,11 @@ export function createApp(deps: AppDeps): CreateAppResult {
       api: API_VERSION,
       core: PACKAGE_VERSION,
       capabilities,
-      sseObservabilityStreams: ["network", "runtime-exception"] as const,
+      sseObservabilityStreams: ["network", "runtime-exception", "local-proxy"] as const,
       sseObservabilityStreamPaths: {
         network: "/v1/sessions/:sessionId/network/stream",
         runtimeException: "/v1/sessions/:sessionId/runtime-exception/stream",
+        localProxy: "/v1/sessions/:sessionId/proxy/stream",
       },
       ...(agentActions ? { agentActions: [...agentActions] } : {}),
     });
@@ -156,10 +157,35 @@ export function createApp(deps: AppDeps): CreateAppResult {
       env: body.env ?? {},
       args: body.args ?? [],
       injectElectronDebugPort: body.injectElectronDebugPort ?? true,
+      useDedicatedProxy: body.useDedicatedProxy === true,
+      proxyRules: Array.isArray(body.proxyRules) ? body.proxyRules : undefined,
     };
     data.apps.push(appDef);
     await store.writeApps(data.apps);
     res.status(201).json({ app: appDef });
+  });
+
+  v1.patch("/apps/:appId", async (req, res) => {
+    const { appId } = req.params;
+    const body = req.body as Partial<AppDefinition>;
+    const data = await store.readApps();
+    const idx = data.apps.findIndex((a) => a.id === appId);
+    if (idx < 0) return jsonError(res, 404, "APP_NOT_FOUND", "appId does not exist");
+    const cur = data.apps[idx]!;
+    const next: AppDefinition = {
+      ...cur,
+      ...(typeof body.name === "string" ? { name: body.name } : {}),
+      ...(typeof body.executable === "string" ? { executable: body.executable } : {}),
+      ...(typeof body.cwd === "string" ? { cwd: body.cwd } : {}),
+      ...(body.env !== undefined ? { env: body.env } : {}),
+      ...(body.args !== undefined ? { args: body.args } : {}),
+      ...(typeof body.injectElectronDebugPort === "boolean" ? { injectElectronDebugPort: body.injectElectronDebugPort } : {}),
+      ...(typeof body.useDedicatedProxy === "boolean" ? { useDedicatedProxy: body.useDedicatedProxy } : {}),
+      ...(body.proxyRules !== undefined ? { proxyRules: body.proxyRules } : {}),
+    };
+    data.apps[idx] = next;
+    await store.writeApps(data.apps);
+    res.json({ app: next });
   });
 
   async function appExists(appId: string): Promise<boolean> {
@@ -449,6 +475,66 @@ export function createApp(deps: AppDeps): CreateAppResult {
     } finally {
       req.removeListener("close", onClose);
       releaseNetworkSseStream();
+    }
+  });
+
+  /** 本地转发代理观测：仅当应用开启 useDedicatedProxy 且会话 running 时可用（与 CDP network/stream 并存） */
+  v1.get("/sessions/:sessionId/proxy/stream", async (req, res) => {
+    const sessionId = req.params.sessionId;
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (ctx.state !== "running") {
+      return jsonError(res, 503, "SESSION_NOT_READY", "Session is not running");
+    }
+    if (ctx.localProxyPort === undefined) {
+      return jsonError(
+        res,
+        503,
+        "LOCAL_PROXY_NOT_ACTIVE",
+        "No local forward proxy for this session (enable useDedicatedProxy on the registered app)",
+      );
+    }
+
+    const ac = new AbortController();
+    const onClose = (): void => {
+      ac.abort();
+    };
+    req.on("close", onClose);
+
+    try {
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+
+      res.write(
+        `event: ready\ndata: ${JSON.stringify({
+          sessionId,
+          localProxyPort: ctx.localProxyPort,
+          note: "proxyRequestComplete events; HTTPS is CONNECT tunnel only (no MITM in Phase 1)",
+        })}\n\n`,
+      );
+
+      const unsub = manager.subscribeProxyNetwork(sessionId, (ev) => {
+        if (res.writableEnded) return;
+        res.write(`data: ${JSON.stringify(ev)}\n\n`);
+      });
+      if (!unsub) {
+        if (!res.writableEnded) res.end();
+        return;
+      }
+
+      await new Promise<void>((resolve) => {
+        if (ac.signal.aborted) {
+          resolve();
+          return;
+        }
+        ac.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      unsub();
+      if (!res.writableEnded) res.end();
+    } finally {
+      req.removeListener("close", onClose);
     }
   });
 

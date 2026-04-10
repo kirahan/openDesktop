@@ -43,5 +43,48 @@ export function requestCompleteToRow(o: NetworkSseRequestComplete): NetworkReque
     type: guessType(rawUrl),
     durationMs:
       typeof o.durationMs === "number" && Number.isFinite(o.durationMs) ? o.durationMs : undefined,
+    source: "cdp",
+  };
+}
+
+/** Core 本地转发代理 `proxyRequestComplete`（packages/core proxy/localProxyTypes） */
+export type ProxySseRequestComplete = {
+  kind?: string;
+  tlsTunnel?: boolean;
+  method?: string;
+  url?: string;
+  status?: number;
+  durationMs?: number;
+  requestId?: string;
+  tags?: string[];
+};
+
+/**
+ * 将代理 SSE `proxyRequestComplete` 转为表格行。
+ */
+export function proxyRequestCompleteToRow(o: ProxySseRequestComplete): NetworkRequestRow {
+  const rawUrl = o.url ?? "";
+  const id =
+    o.requestId?.trim() || `proxy-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  let host = "—";
+  let pathPart = rawUrl;
+  try {
+    const u = new URL(rawUrl);
+    host = u.host || "—";
+    pathPart = `${u.pathname}${u.search}` || "/";
+  } catch {
+    /* 非标准 URL */
+  }
+  return {
+    id,
+    status: typeof o.status === "number" && Number.isFinite(o.status) ? o.status : 0,
+    method: (o.method ?? "GET").toUpperCase(),
+    host,
+    url: pathPart || rawUrl,
+    type: o.tlsTunnel ? "tunnel" : guessType(rawUrl),
+    durationMs:
+      typeof o.durationMs === "number" && Number.isFinite(o.durationMs) ? o.durationMs : undefined,
+    source: "proxy",
+    tlsTunnel: o.tlsTunnel === true,
   };
 }

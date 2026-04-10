@@ -49,8 +49,10 @@ describe("createApp HTTP", () => {
     expect(Array.isArray(v.body.sseObservabilityStreams)).toBe(true);
     expect(v.body.sseObservabilityStreams).toContain("network");
     expect(v.body.sseObservabilityStreams).toContain("runtime-exception");
+    expect(v.body.sseObservabilityStreams).toContain("local-proxy");
     expect(v.body.sseObservabilityStreamPaths?.network).toContain("/network/stream");
     expect(v.body.sseObservabilityStreamPaths?.runtimeException).toContain("/runtime-exception/stream");
+    expect(v.body.sseObservabilityStreamPaths?.localProxy).toContain("/proxy/stream");
   });
 
   it("GET /v1/apps requires Bearer token", async () => {

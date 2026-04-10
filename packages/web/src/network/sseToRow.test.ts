@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { requestCompleteToRow } from "./sseToRow.js";
+import { proxyRequestCompleteToRow, requestCompleteToRow } from "./sseToRow.js";
 
 describe("requestCompleteToRow", () => {
   it("parses absolute https URL", () => {
@@ -16,10 +16,27 @@ describe("requestCompleteToRow", () => {
     expect(r.host).toBe("api.example.com");
     expect(r.url).toContain("/v1/x");
     expect(r.status).toBe(200);
+    expect(r.source).toBe("cdp");
   });
 
   it("falls back id when requestId missing", () => {
     const r = requestCompleteToRow({ kind: "requestComplete", url: "https://a.com/", method: "POST" });
     expect(r.id.length).toBeGreaterThan(4);
+  });
+});
+
+describe("proxyRequestCompleteToRow", () => {
+  it("marks tls tunnel and proxy source", () => {
+    const r = proxyRequestCompleteToRow({
+      kind: "proxyRequestComplete",
+      requestId: "p1",
+      method: "CONNECT",
+      url: "https://example.com:443/",
+      durationMs: 5,
+      tlsTunnel: true,
+    });
+    expect(r.source).toBe("proxy");
+    expect(r.tlsTunnel).toBe(true);
+    expect(r.type).toBe("tunnel");
   });
 });

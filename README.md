@@ -151,6 +151,7 @@ yarn od -- doctor --app demo-mock
 | `GET /v1/sessions/:id/metrics`                              | 子进程 CPU/内存；不可得时 `metrics: null` + `reason`                                                                               |
 | `GET /v1/sessions/:id/console/stream?targetId=<id>`        | **SSE**（`text/event-stream`）：订阅后持续推送 `Runtime.consoleAPICalled`（仅连接建立后的新日志，无历史）。需 Bearer；会话非 `running` 或无 CDP 时 **503**；全局并发路数有上限时 **429**。与下方 Agent `console-messages` **短时采样**互补，**不含 Network 监听**。 |
 | `GET /v1/sessions/:id/network/stream?targetId=<id>`       | **SSE**：每条请求完成（`loadingFinished`/`loadingFailed`）推送元数据 JSON（**无 body**）。可选 `stripQuery`（默认 true）、`maxEventsPerSecond`（默认 40，上限 200）；超速率时丢弃并 `event: warning`（`NETWORK_SSE_RATE_LIMIT`）。与 `network-observe` **窗口聚合**互补。并发上限 **429**。 |
+| `GET /v1/sessions/:id/proxy/stream`                         | **SSE**：**本地转发代理**观测（`proxyRequestComplete`）。仅当对应已注册应用开启 **专用代理** 且本会话已拉起代理时可用，否则 **503**（`LOCAL_PROXY_NOT_ACTIVE`）。首期 **HTTPS 为 CONNECT 隧道不解密**（事件含 `tlsTunnel: true`）；与 CDP `network/stream` **并存**。 |
 | `GET /v1/sessions/:id/runtime-exception/stream?targetId=<id>` | **SSE**：持续推送 `Runtime.exceptionThrown` 解析结果（与短时 `runtime-exception` action 字段对齐）。**须** `allowScriptExecution: true`，否则 **403**。每分钟推送上限，超限丢弃并 `event: warning`。并发上限 **429**。 |
 | `GET /v1/sessions/:id/logs/export?format=jsonl&level=error` | 服务端过滤后导出（`format=txt` 亦可）                                                                                                |
 | `GET /v1/agent/sessions/:id/snapshot`                       | OODA 结构化快照（拓扑摘要、错误计数、指标等）                                                                                                |
@@ -166,7 +167,9 @@ curl -N -H "Authorization: Bearer $TOKEN" \
   "http://127.0.0.1:8787/v1/sessions/$SESSION/network/stream?targetId=$TARGET"
 ```
 
-`GET /v1/version` 的 `capabilities` 数组可用来探测是否启用 Agent 等；**`sseObservabilityStreams`** / **`sseObservabilityStreamPaths`** 列出网络与运行时异常两类观测 SSE 的可发现名与路径模板。
+`GET /v1/version` 的 `capabilities` 数组可用来探测是否启用 Agent 等；**`sseObservabilityStreams`** / **`sseObservabilityStreamPaths`** 列出网络、运行时异常与 **本地代理** 等观测 SSE 的可发现名与路径模板。
+
+**本地转发代理与目标应用**：已注册应用开启 **专用代理** 时，启动流程会注入 `HTTP_PROXY`/`HTTPS_PROXY`。若目标为 **自带独立代理配置的 Electron 等应用**，其可能 **不采用** 上述环境变量，导致 **`proxy/stream` 无事件**。可改用 **系统全局代理** 指向同一 loopback 端口，或在 **应用内** 将代理设为与本机转发代理一致（详见 `packages/web/README.md`「本地转发代理」）。
 
 **操作配方目录**：默认 `<数据目录>/recipes/`，可按应用分子目录存放，例如 `recipes/<appSlug>/<recipeId>.json`。覆盖目录：`OPENDESKTOP_RECIPES_DIR`。配方 `schemaVersion: 1`，步骤目前仅支持 `action: "click"`；若首次 `click` 失败，可在步骤上配置 `match`（如 `labelContains`）以触发 **DOM 探索兜底**（与 `explore` 同源解析），唯一匹配后重试并写回新 `selector`。
 

@@ -13,4 +13,8 @@ export type NetworkRequestRow = {
   type: string;
   /** 请求耗时（毫秒），SSE 提供 */
   durationMs?: number;
+  /** CDP 页面网络 vs 本地转发代理 */
+  source?: "cdp" | "proxy";
+  /** 代理侧 HTTPS CONNECT（不解密 TLS）时为 true */
+  tlsTunnel?: boolean;
 };

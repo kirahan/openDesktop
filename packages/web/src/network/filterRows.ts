@@ -7,7 +7,17 @@ export function filterNetworkRows(rows: NetworkRequestRow[], query: string): Net
   const q = query.trim().toLowerCase();
   if (!q) return rows;
   return rows.filter((r) => {
-    const blob = [r.method, r.host, r.url, r.type, String(r.status), String(r.durationMs ?? ""), r.id]
+    const blob = [
+      r.method,
+      r.host,
+      r.url,
+      r.type,
+      String(r.status),
+      String(r.durationMs ?? ""),
+      r.id,
+      r.source ?? "",
+      r.tlsTunnel ? "tunnel" : "",
+    ]
       .join(" ")
       .toLowerCase();
     return blob.includes(q);
