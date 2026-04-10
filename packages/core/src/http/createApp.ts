@@ -26,6 +26,7 @@ import {
 } from "../cdp/runtimeExceptionStream.js";
 import { listAgentActionNamesForVersion } from "./agentActionAliases.js";
 import { registerObservabilityRoutes } from "./registerObservability.js";
+import { domPickArm, domPickCancel, domPickResolve } from "../cdp/domPick.js";
 import {
   injectUserScriptsIntoPageTargets,
   type UserScriptInjectResult,
@@ -382,6 +383,72 @@ export function createApp(deps: AppDeps): CreateAppResult {
       targets: result.targets,
       errors: result.errors,
     });
+  });
+
+  /** DOM 拾取（spike）：注入 pointer 监听 → 用户在被测窗口内点击 → resolve 取节点（单 page target）。 */
+  v1.post("/sessions/:sessionId/targets/:targetId/dom-pick/arm", async (req, res) => {
+    const { sessionId, targetId } = req.params;
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (!ctx.allowScriptExecution) {
+      return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+    }
+    if (ctx.state !== "running" || ctx.cdpPort === undefined) {
+      return jsonError(res, 503, "CDP_NOT_READY", "Session has no active CDP endpoint");
+    }
+    const arm = await domPickArm(ctx.cdpPort, targetId);
+    if ("error" in arm) {
+      return jsonError(res, 503, "CDP_NOT_READY", arm.error);
+    }
+    return res.status(200).json(arm);
+  });
+
+  v1.post("/sessions/:sessionId/targets/:targetId/dom-pick/resolve", async (req, res) => {
+    const { sessionId, targetId } = req.params;
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (!ctx.allowScriptExecution) {
+      return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+    }
+    if (ctx.state !== "running" || ctx.cdpPort === undefined) {
+      return jsonError(res, 503, "CDP_NOT_READY", "Session has no active CDP endpoint");
+    }
+    const result = await domPickResolve(ctx.cdpPort, targetId);
+    if (!result.ok) {
+      if (result.code === "DOM_PICK_EMPTY") {
+        return jsonError(res, 400, result.code, result.message);
+      }
+      if (result.code === "DOM_PICK_NO_NODE") {
+        return jsonError(res, 400, result.code, result.message);
+      }
+      return jsonError(res, 503, "CDP_NOT_READY", result.message);
+    }
+    return res.status(200).json({
+      pick: result.pick,
+      node: result.node,
+      highlightApplied: result.highlightApplied,
+      highlightMethod: result.highlightMethod,
+      highlightOverlayError: result.highlightOverlayError,
+      highlightPersistNote: result.highlightPersistNote,
+    });
+  });
+
+  /** 结束 DOM 拾取：卸监听、清页面标注与 stash */
+  v1.post("/sessions/:sessionId/targets/:targetId/dom-pick/cancel", async (req, res) => {
+    const { sessionId, targetId } = req.params;
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (!ctx.allowScriptExecution) {
+      return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+    }
+    if (ctx.state !== "running" || ctx.cdpPort === undefined) {
+      return jsonError(res, 503, "CDP_NOT_READY", "Session has no active CDP endpoint");
+    }
+    const out = await domPickCancel(ctx.cdpPort, targetId);
+    if ("error" in out) {
+      return jsonError(res, 503, "CDP_NOT_READY", out.error);
+    }
+    return res.status(200).json(out);
   });
 
   registerObservabilityRoutes(v1, {

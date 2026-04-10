@@ -2,6 +2,7 @@ import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } 
 import { NetworkView } from "./network/NetworkView.js";
 import { proxyRequestCompleteToRow, requestCompleteToRow } from "./network/sseToRow.js";
 import type { NetworkRequestRow } from "./network/types.js";
+import { domPickStateKey } from "./domPickUi.js";
 
 type DetailKind = "list-window" | "metrics" | "snapshot";
 
@@ -1832,14 +1833,45 @@ function topologyNodeMatchesFilter(
   return parts.every((part) => hay.includes(part));
 }
 
+/** 窗口列表筛选关键词，持久化到 localStorage */
+const TOPOLOGY_WINDOW_FILTER_STORAGE_KEY = "od_topology_window_filter";
+
+/** 窗口列表内按 target 的 DOM 拾取（arm / resolve / cancel） */
+type TopologyDomPickProps = {
+  busyKey: string | null;
+  hints: Record<string, string>;
+  onArm: (sessionId: string, targetId: string) => void | Promise<void>;
+  onResolve: (sessionId: string, targetId: string) => void | Promise<void>;
+  onCancel: (sessionId: string, targetId: string) => void | Promise<void>;
+};
+
 function TopologyVisual({
   raw,
   snapshotCtx,
+  domPick,
 }: {
   raw: string;
   snapshotCtx?: TopologySnapshotContext | null;
+  domPick?: TopologyDomPickProps;
 }) {
-  const [windowListFilter, setWindowListFilter] = useState("");
+  const [windowListFilter, setWindowListFilter] = useState(() => {
+    try {
+      return typeof localStorage !== "undefined"
+        ? localStorage.getItem(TOPOLOGY_WINDOW_FILTER_STORAGE_KEY) ?? ""
+        : "";
+    } catch {
+      return "";
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(TOPOLOGY_WINDOW_FILTER_STORAGE_KEY, windowListFilter);
+    } catch {
+      /* 忽略配额 / 隐私模式等 */
+    }
+  }, [windowListFilter]);
+
   type TopoPayload = {
     schemaVersion?: number;
     sessionId?: string;
@@ -1880,6 +1912,7 @@ function TopologyVisual({
   }
 
   const data = parsed.data;
+  const sessionIdForDomPick = data.sessionId ?? snapshotCtx?.sessionId ?? "";
   return (
     <div style={{ padding: 14 }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 12 }}>
@@ -1997,7 +2030,14 @@ function TopologyVisual({
             gap: 10,
           }}
         >
-          {filteredNodes.map((n, i) => (
+          {filteredNodes.map((n, i) => {
+            const domPickKey =
+              domPick && sessionIdForDomPick && n.targetId
+                ? domPickStateKey(sessionIdForDomPick, n.targetId)
+                : "";
+            const domPickBusyHere = Boolean(domPick && domPickKey && domPick.busyKey === domPickKey);
+            const domPickHintHere = domPick && domPickKey ? domPick.hints[domPickKey] : undefined;
+            return (
             <div
               key={n.nodeId || n.targetId || i}
               style={{
@@ -2046,8 +2086,96 @@ function TopologyVisual({
               >
                 target: {n.targetId?.slice(0, 12)}…
               </div>
+              {domPick && sessionIdForDomPick && n.type === "page" && n.targetId ? (
+                <div style={{ marginTop: 10 }}>
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: OBS_PALETTE.textMuted,
+                      marginBottom: 6,
+                      lineHeight: 1.35,
+                    }}
+                  >
+                    DOM 拾取（需 allowScriptExecution）：准备后移动鼠标可<strong>实时</strong>预览（虚线框+半透明填充+右下角标签
+                    「典型 class · 标签」），点击后<strong>实线</strong>确认；「拾取解析」仅拉 CDP 节点摘要。
+                    DevTools→Elements 可搜 selectorHint；勿用主窗口 Ctrl+F。
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                    <button
+                      type="button"
+                      title="在此 page target 注入 pointer 监听"
+                      disabled={domPickBusyHere}
+                      onClick={() => void domPick.onArm(sessionIdForDomPick, n.targetId)}
+                      style={{
+                        fontSize: 11,
+                        padding: "4px 8px",
+                        borderRadius: 6,
+                        border: `1px solid ${OBS_PALETTE.borderActive}`,
+                        background: domPickBusyHere ? "#f1f5f9" : "#f0fdf4",
+                        color: "#166534",
+                        cursor: domPickBusyHere ? "wait" : "pointer",
+                      }}
+                    >
+                      {domPickBusyHere ? "处理中…" : "拾取准备"}
+                    </button>
+                    <button
+                      type="button"
+                      title="解析该 target 上最近一次点击坐标对应的 DOM 节点"
+                      disabled={domPickBusyHere}
+                      onClick={() => void domPick.onResolve(sessionIdForDomPick, n.targetId)}
+                      style={{
+                        fontSize: 11,
+                        padding: "4px 8px",
+                        borderRadius: 6,
+                        border: `1px solid ${OBS_PALETTE.borderActive}`,
+                        background: domPickBusyHere ? "#f1f5f9" : "#faf5ff",
+                        color: "#6b21a8",
+                        cursor: domPickBusyHere ? "wait" : "pointer",
+                      }}
+                    >
+                      拾取解析
+                    </button>
+                    <button
+                      type="button"
+                      title="卸掉拾取监听并清除页面描边、浮动标签（结束拾取模式）"
+                      disabled={domPickBusyHere}
+                      onClick={() => void domPick.onCancel(sessionIdForDomPick, n.targetId)}
+                      style={{
+                        fontSize: 11,
+                        padding: "4px 8px",
+                        borderRadius: 6,
+                        border: `1px solid ${OBS_PALETTE.border}`,
+                        background: domPickBusyHere ? "#f1f5f9" : "#f8fafc",
+                        color: "#475569",
+                        cursor: domPickBusyHere ? "wait" : "pointer",
+                      }}
+                    >
+                      结束拾取
+                    </button>
+                  </div>
+                  {domPickHintHere ? (
+                    <div
+                      style={{
+                        marginTop: 4,
+                        fontSize: 10,
+                        color:
+                          domPickHintHere.includes("拾取「") ||
+                            domPickHintHere.includes("已准备拾取") ||
+                            domPickHintHere.includes("已结束拾取")
+                              ? "#15803d"
+                              : "#b91c1c",
+                        lineHeight: 1.35,
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {domPickHintHere}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
       <RawJsonCollapse raw={raw} />
@@ -2240,12 +2368,15 @@ function ObservationBody({
   text,
   loading,
   topologySnapshotCtx,
+  domPick,
 }: {
   kind: DetailKind | null;
   text: string | null;
   loading: boolean;
   /** 仅拓扑面板：用于按 target 拉取页面截图 */
   topologySnapshotCtx?: TopologySnapshotContext | null;
+  /** 仅拓扑面板：窗口卡片内 DOM 拾取按钮 */
+  domPick?: TopologyDomPickProps | null;
 }) {
   if (loading && !text) {
     return (
@@ -2280,7 +2411,14 @@ function ObservationBody({
       </pre>
     );
   }
-  if (kind === "list-window") return <TopologyVisual raw={text} snapshotCtx={topologySnapshotCtx ?? undefined} />;
+  if (kind === "list-window")
+    return (
+      <TopologyVisual
+        raw={text}
+        snapshotCtx={topologySnapshotCtx ?? undefined}
+        domPick={domPick ?? undefined}
+      />
+    );
   if (kind === "metrics") return <MetricsVisual raw={text} />;
   if (kind === "snapshot") return <SnapshotVisual raw={text} />;
   return (
@@ -2328,6 +2466,10 @@ export function App() {
   const [userScriptInjectBusy, setUserScriptInjectBusy] = useState<string | null>(null);
   /** 会话 ID → 注入结果摘要或错误文案 */
   const [userScriptInjectHint, setUserScriptInjectHint] = useState<Record<string, string>>({});
+  /** `sessionId::targetId` → DOM 拾取 arm/resolve 进行中 */
+  const [domPickBusy, setDomPickBusy] = useState<string | null>(null);
+  /** `sessionId::targetId` → 拾取结果或错误 */
+  const [domPickHint, setDomPickHint] = useState<Record<string, string>>({});
 
   const apiRoot = resolveApiRoot(base);
   const sessionsUrl = apiRoot ? `${apiRoot}/v1/sessions` : "/v1/sessions";
@@ -2549,6 +2691,179 @@ export function App() {
       }));
     } finally {
       setUserScriptInjectBusy(null);
+    }
+  }
+
+  async function domPickArmForTarget(sessionId: string, targetId: string) {
+    const key = domPickStateKey(sessionId, targetId);
+    if (!tokenTrimmed) {
+      setDomPickHint((h) => ({ ...h, [key]: "请先填写 Token" }));
+      return;
+    }
+    setDomPickBusy(key);
+    setDomPickHint((h) => ({ ...h, [key]: "" }));
+    try {
+      const res = await fetch(
+        apiUrl(
+          `/v1/sessions/${encodeURIComponent(sessionId)}/targets/${encodeURIComponent(targetId)}/dom-pick/arm`,
+        ),
+        { method: "POST", headers },
+      );
+      const raw = await res.text();
+      let parsed: { armed?: boolean; error?: { message?: string; code?: string } };
+      try {
+        parsed = JSON.parse(raw) as typeof parsed;
+      } catch {
+        throw new Error(raw.slice(0, 200));
+      }
+      if (!res.ok) {
+        const msg =
+          parsed.error?.message ?? parsed.error?.code ?? `HTTP ${res.status}: ${raw.slice(0, 200)}`;
+        throw new Error(msg);
+      }
+      setDomPickHint((h) => ({
+        ...h,
+        [key]: `已准备拾取 → 请在此 target 对应窗口内点击页面 → 再点「拾取解析」`,
+      }));
+    } catch (e) {
+      setDomPickHint((h) => ({
+        ...h,
+        [key]: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setDomPickBusy(null);
+    }
+  }
+
+  async function domPickResolveForTarget(sessionId: string, targetId: string) {
+    const key = domPickStateKey(sessionId, targetId);
+    if (!tokenTrimmed) {
+      setDomPickHint((h) => ({ ...h, [key]: "请先填写 Token" }));
+      return;
+    }
+    setDomPickBusy(key);
+    setDomPickHint((h) => ({ ...h, [key]: "" }));
+    try {
+      const res = await fetch(
+        apiUrl(
+          `/v1/sessions/${encodeURIComponent(sessionId)}/targets/${encodeURIComponent(targetId)}/dom-pick/resolve`,
+        ),
+        { method: "POST", headers },
+      );
+      const raw = await res.text();
+      let parsed: {
+        pick?: { x: number; y: number; ts: number };
+        node?: {
+          nodeName?: string;
+          localName?: string;
+          attributes?: Record<string, string>;
+          selectorHint?: string;
+        };
+        highlightApplied?: boolean;
+        highlightMethod?: string;
+        highlightOverlayError?: string;
+        highlightPersistNote?: string;
+        error?: { message?: string; code?: string };
+      };
+      try {
+        parsed = JSON.parse(raw) as typeof parsed;
+      } catch {
+        throw new Error(raw.slice(0, 200));
+      }
+      if (!res.ok) {
+        const msg =
+          parsed.error?.message ?? parsed.error?.code ?? `HTTP ${res.status}: ${raw.slice(0, 200)}`;
+        throw new Error(msg);
+      }
+      const name = parsed.node?.localName ?? parsed.node?.nodeName ?? "?";
+      const attrs = parsed.node?.attributes;
+      const attrPreview =
+        attrs && Object.keys(attrs).length > 0
+          ? ` ${Object.entries(attrs)
+              .slice(0, 4)
+              .map(([k, v]) => `${k}=${String(v).slice(0, 40)}`)
+              .join(" ")}`
+          : "";
+      const xy = parsed.pick ? ` (${Math.round(parsed.pick.x)}, ${Math.round(parsed.pick.y)})` : "";
+      const method =
+        parsed.highlightMethod === "cdp-overlay"
+          ? "CDP Overlay（断连后即消失）"
+          : parsed.highlightMethod === "page-inject"
+            ? "页面注入描边（持久）"
+            : "";
+      const hl =
+        parsed.highlightApplied === true
+          ? ` · 已高亮（${method || "未知方式"}）`
+          : parsed.highlightApplied === false
+            ? " · 未持久高亮（拾取数据仍有效；若曾显示 CDP Overlay，断连后会消失）"
+            : "";
+      const note =
+        parsed.highlightPersistNote && parsed.highlightPersistNote.length > 0
+          ? ` · ${parsed.highlightPersistNote.slice(0, 220)}${parsed.highlightPersistNote.length > 220 ? "…" : ""}`
+          : "";
+      const dbg =
+        parsed.highlightOverlayError && parsed.highlightMethod === "page-inject" && parsed.highlightApplied
+          ? ` · Overlay 诊断: ${parsed.highlightOverlayError.slice(0, 200)}${parsed.highlightOverlayError.length > 200 ? "…" : ""}`
+          : parsed.highlightOverlayError && !parsed.highlightApplied
+            ? ` · 高亮: ${parsed.highlightOverlayError.slice(0, 280)}${parsed.highlightOverlayError.length > 280 ? "…" : ""}`
+            : "";
+      const sel = parsed.node?.selectorHint?.trim();
+      const devtools =
+        sel && sel.length > 0
+          ? ` · DevTools：在被测窗口打开开发者工具（或经 remote-debugging 附加）→ Elements → 点搜索图标或 Ctrl/Cmd+F，在「按选择器查找」中粘贴试：${sel}（页面主窗口 Ctrl+F 搜的是正文，不是标签）`
+          : "";
+      setDomPickHint((h) => ({
+        ...h,
+        [key]: `拾取「${name}」${xy}${attrPreview ? ` · ${attrPreview.slice(0, 120)}` : ""}${hl}${note}${dbg}${devtools}`,
+      }));
+    } catch (e) {
+      setDomPickHint((h) => ({
+        ...h,
+        [key]: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setDomPickBusy(null);
+    }
+  }
+
+  async function domPickCancelForTarget(sessionId: string, targetId: string) {
+    const key = domPickStateKey(sessionId, targetId);
+    if (!tokenTrimmed) {
+      setDomPickHint((h) => ({ ...h, [key]: "请先填写 Token" }));
+      return;
+    }
+    setDomPickBusy(key);
+    setDomPickHint((h) => ({ ...h, [key]: "" }));
+    try {
+      const res = await fetch(
+        apiUrl(
+          `/v1/sessions/${encodeURIComponent(sessionId)}/targets/${encodeURIComponent(targetId)}/dom-pick/cancel`,
+        ),
+        { method: "POST", headers },
+      );
+      const raw = await res.text();
+      let parsed: { cleared?: boolean; error?: { message?: string; code?: string } };
+      try {
+        parsed = JSON.parse(raw) as typeof parsed;
+      } catch {
+        throw new Error(raw.slice(0, 200));
+      }
+      if (!res.ok) {
+        const msg =
+          parsed.error?.message ?? parsed.error?.code ?? `HTTP ${res.status}: ${raw.slice(0, 200)}`;
+        throw new Error(msg);
+      }
+      setDomPickHint((h) => ({
+        ...h,
+        [key]: "已结束拾取，页面监听与标注已清除",
+      }));
+    } catch (e) {
+      setDomPickHint((h) => ({
+        ...h,
+        [key]: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setDomPickBusy(null);
     }
   }
 
@@ -3628,6 +3943,17 @@ export function App() {
                                 apiRoot: apiRoot ?? "",
                                 token: tokenTrimmed,
                                 cdpDirectPort: sessions.find((s) => s.id === detailId)?.cdpPort,
+                              }
+                            : undefined
+                        }
+                        domPick={
+                          panelKind === "list-window" && detailId
+                            ? {
+                                busyKey: domPickBusy,
+                                hints: domPickHint,
+                                onArm: domPickArmForTarget,
+                                onResolve: domPickResolveForTarget,
+                                onCancel: domPickCancelForTarget,
                               }
                             : undefined
                         }
