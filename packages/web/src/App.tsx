@@ -75,34 +75,6 @@ const DEFAULT_USER_SCRIPT = `// ==UserScript==
 
 `;
 
-/** `POST …/actions` 中 `network-observe` 成功响应（与 Core JSON 对齐，供 Studio 展示） */
-type NetworkObserveUiPayload = {
-  schemaVersion?: number;
-  windowMs?: number;
-  totalRequests?: number;
-  completedRequests?: number;
-  maxConcurrent?: number;
-  slowRequests?: Array<{ method?: string; url?: string; status?: number; durationMs?: number }>;
-  truncated?: boolean;
-  inflightAtEnd?: number;
-  slowThresholdMs?: number;
-  stripQuery?: boolean;
-};
-
-/** `POST …/actions` 中 `runtime-exception` 成功响应 */
-type RuntimeExceptionUiPayload = {
-  text?: string;
-  textTruncated?: boolean;
-  frames?: Array<{
-    functionName?: string;
-    url?: string;
-    lineNumber?: number;
-    columnNumber?: number;
-  }>;
-  note?: string;
-  waitMs?: number;
-};
-
 /**
  * 解析 API 基址。未填写时：仅当页面明显与 Core 同源（:8787）才用相对路径 `/v1`；
  * 否则（Vite、Cursor 内置预览、file:// 等）默认直连 `http://127.0.0.1:8787`，避免请求落到非 Core 服务得到 404。
@@ -1220,18 +1192,6 @@ function PageTargetScreenshot({
   const [exploreText, setExploreText] = useState<string | null>(null);
   const [interestPattern, setInterestPattern] = useState("");
 
-  const [netLoading, setNetLoading] = useState(false);
-  const [netErr, setNetErr] = useState<string | null>(null);
-  const [netResult, setNetResult] = useState<NetworkObserveUiPayload | null>(null);
-  const [netWindowMsStr, setNetWindowMsStr] = useState("3000");
-  const [netSlowMsStr, setNetSlowMsStr] = useState("1000");
-  const [netStripQuery, setNetStripQuery] = useState(true);
-
-  const [stackLoading, setStackLoading] = useState(false);
-  const [stackErr, setStackErr] = useState<string | null>(null);
-  const [stackResult, setStackResult] = useState<RuntimeExceptionUiPayload | null>(null);
-  const [stackWaitMsStr, setStackWaitMsStr] = useState("2000");
-
   const tokenOk = ctx.token.trim().length > 0;
   const liveDock = useLiveConsoleDock();
 
@@ -1374,50 +1334,6 @@ function PageTargetScreenshot({
     }
   }, [postAgent, tokenOk]);
 
-  const runNetworkObserve = useCallback(async () => {
-    if (!tokenOk) return;
-    setNetLoading(true);
-    setNetErr(null);
-    try {
-      const w = parseInt(netWindowMsStr, 10);
-      const windowMs = Math.min(30000, Math.max(100, Number.isFinite(w) ? w : 3000));
-      const s = parseInt(netSlowMsStr, 10);
-      const slowThresholdMs = Math.max(0, Number.isFinite(s) ? s : 1000);
-      const j = (await postAgent({
-        action: "network-observe",
-        windowMs,
-        slowThresholdMs,
-        stripQuery: netStripQuery,
-      })) as NetworkObserveUiPayload;
-      setNetResult(j);
-    } catch (e) {
-      setNetErr(e instanceof Error ? e.message : String(e));
-      setNetResult(null);
-    } finally {
-      setNetLoading(false);
-    }
-  }, [postAgent, tokenOk, netWindowMsStr, netSlowMsStr, netStripQuery]);
-
-  const runRuntimeException = useCallback(async () => {
-    if (!tokenOk) return;
-    setStackLoading(true);
-    setStackErr(null);
-    try {
-      const w = parseInt(stackWaitMsStr, 10);
-      const waitMs = Math.min(30_000, Math.max(100, Number.isFinite(w) ? w : 2000));
-      const j = (await postAgent({
-        action: "runtime-exception",
-        waitMs,
-      })) as RuntimeExceptionUiPayload;
-      setStackResult(j);
-    } catch (e) {
-      setStackErr(e instanceof Error ? e.message : String(e));
-      setStackResult(null);
-    } finally {
-      setStackLoading(false);
-    }
-  }, [postAgent, tokenOk, stackWaitMsStr]);
-
   if (!enabled) return null;
 
   if (!tokenOk) {
@@ -1432,7 +1348,7 @@ function PageTargetScreenshot({
           color: OBS_PALETTE.textMuted,
         }}
       >
-        填写 Bearer token 后可使用截图、DOM、控制台采样、HTTPS 观测（network-observe）、异常栈（runtime-exception）、全局快照（renderer-globals）与探索（explore）。
+        填写 Bearer token 后可使用截图、DOM、控制台短时采样、全局快照（renderer-globals）与探索（explore）；HTTPS / 异常栈请用下方「实时观测」SSE 流。
       </div>
     );
   }
@@ -1440,8 +1356,6 @@ function PageTargetScreenshot({
   const shotLabel = shotLoading ? "截取中…" : shotSrc ? "刷新截图" : "截取页面";
   const domLabel = domLoading ? "读取中…" : domHtml ? "刷新 DOM" : "DOM 结构";
   const conLabel = conLoading ? "监听中…" : conEntries !== null ? "刷新控制台" : "控制台";
-  const netLabel = netLoading ? "观测中…" : netResult ? "刷新 HTTPS" : "HTTPS 观测";
-  const stackLabel = stackLoading ? "监听中…" : stackResult ? "刷新异常栈" : "异常栈";
 
   return (
     <div style={{ marginBottom: 10 }}>
@@ -1487,94 +1401,6 @@ function PageTargetScreenshot({
         >
           {exploreLoading ? "探索中…" : exploreText ? "刷新探索" : "探索"}
         </button>
-        <button
-          type="button"
-          disabled={netLoading}
-          onClick={() => void runNetworkObserve()}
-          style={pageInspectorBtnStyle(netLoading)}
-          title="Agent network-observe：短时窗口内聚合该 target 的 HTTP(S) 请求（约阻塞「观测窗口」毫秒；不含 body）"
-        >
-          {netLabel}
-        </button>
-        <button
-          type="button"
-          disabled={stackLoading}
-          onClick={() => void runRuntimeException()}
-          style={pageInspectorBtnStyle(stackLoading)}
-          title="Agent runtime-exception：在监听窗口内捕获未捕获异常与调用栈（须 allowScriptExecution；约阻塞「监听」毫秒）"
-        >
-          {stackLabel}
-        </button>
-      </div>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 8,
-          marginBottom: 8,
-        }}
-      >
-        <label style={{ fontSize: 11, color: OBS_PALETTE.textMuted, display: "flex", alignItems: "center", gap: 6 }}>
-          窗口 ms
-          <input
-            type="number"
-            min={100}
-            max={30000}
-            value={netWindowMsStr}
-            onChange={(e) => setNetWindowMsStr(e.target.value)}
-            style={{
-              width: 72,
-              padding: "4px 8px",
-              fontSize: 11,
-              borderRadius: 6,
-              border: `1px solid ${OBS_PALETTE.border}`,
-            }}
-          />
-        </label>
-        <label style={{ fontSize: 11, color: OBS_PALETTE.textMuted, display: "flex", alignItems: "center", gap: 6 }}>
-          慢请求 ≥
-          <input
-            type="number"
-            min={0}
-            value={netSlowMsStr}
-            onChange={(e) => setNetSlowMsStr(e.target.value)}
-            style={{
-              width: 72,
-              padding: "4px 8px",
-              fontSize: 11,
-              borderRadius: 6,
-              border: `1px solid ${OBS_PALETTE.border}`,
-            }}
-          />
-          ms
-        </label>
-        <label style={{ fontSize: 11, color: OBS_PALETTE.textMuted, display: "flex", alignItems: "center", gap: 6 }}>
-          <input
-            type="checkbox"
-            checked={netStripQuery}
-            onChange={(e) => setNetStripQuery(e.target.checked)}
-          />
-          去掉 query/hash
-        </label>
-        <label style={{ fontSize: 11, color: OBS_PALETTE.textMuted, display: "flex", alignItems: "center", gap: 6 }}>
-          异常栈监听 ms
-          <input
-            type="number"
-            min={100}
-            max={30000}
-            value={stackWaitMsStr}
-            onChange={(e) => setStackWaitMsStr(e.target.value)}
-            style={{
-              width: 72,
-              padding: "4px 8px",
-              fontSize: 11,
-              borderRadius: 6,
-              border: `1px solid ${OBS_PALETTE.border}`,
-            }}
-          />
-        </label>
-        <span style={{ fontSize: 10, color: OBS_PALETTE.textMuted }}>须会话 allowScriptExecution</span>
       </div>
       <div
         style={{
@@ -1636,8 +1462,7 @@ function PageTargetScreenshot({
           >
             <div style={{ fontSize: 11, fontWeight: 600, color: "#475569", marginBottom: 6 }}>实时观测（右侧抽屉）</div>
             <p style={{ margin: "0 0 8px", fontSize: 10, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
-              与下方「HTTPS 观测」「异常栈」短时采样互补：此处为 <strong>SSE 长连接</strong>（仅连接后的新事件）。可分别打开
-              <strong> 控制台 / HTTPS / 异常栈 </strong>
+              此处为 <strong>SSE 长连接</strong>（仅连接后的新事件）。可分别打开<strong> 控制台 / HTTPS / 异常栈 </strong>
               三种标签；限流时会出现 <code style={{ fontSize: 10 }}>[warning]</code>。
             </p>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
@@ -1904,288 +1729,6 @@ function PageTargetScreenshot({
           探索：{exploreErr}
         </div>
       )}
-      {netResult !== null && (
-        <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 11, color: OBS_PALETTE.textMuted, marginBottom: 8 }}>
-            HTTPS 观测（<code style={{ fontSize: 10 }}>network-observe</code>，CDP Network，不含 body）
-          </div>
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 8,
-              marginBottom: 10,
-            }}
-          >
-            <div
-              style={{
-                minWidth: 100,
-                padding: "10px 12px",
-                borderRadius: 10,
-                background: "linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%)",
-                border: "1px solid #c7d2fe",
-              }}
-            >
-              <div style={{ fontSize: 10, color: "#4338ca", fontWeight: 600 }}>发起数</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "#312e81" }}>
-                {typeof netResult.totalRequests === "number" ? netResult.totalRequests : "—"}
-              </div>
-            </div>
-            <div
-              style={{
-                minWidth: 100,
-                padding: "10px 12px",
-                borderRadius: 10,
-                background: "linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%)",
-                border: "1px solid #a7f3d0",
-              }}
-            >
-              <div style={{ fontSize: 10, color: "#047857", fontWeight: 600 }}>已完成</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "#065f46" }}>
-                {typeof netResult.completedRequests === "number" ? netResult.completedRequests : "—"}
-              </div>
-            </div>
-            <div
-              style={{
-                minWidth: 100,
-                padding: "10px 12px",
-                borderRadius: 10,
-                background: "linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%)",
-                border: "1px solid #fdba74",
-              }}
-            >
-              <div style={{ fontSize: 10, color: "#c2410c", fontWeight: 600 }}>并发峰值</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "#9a3412" }}>
-                {typeof netResult.maxConcurrent === "number" ? netResult.maxConcurrent : "—"}
-              </div>
-            </div>
-            <div
-              style={{
-                minWidth: 100,
-                padding: "10px 12px",
-                borderRadius: 10,
-                background: "#f8fafc",
-                border: `1px solid ${OBS_PALETTE.border}`,
-              }}
-            >
-              <div style={{ fontSize: 10, color: OBS_PALETTE.textMuted, fontWeight: 600 }}>窗口末在途</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "#0f172a" }}>
-                {typeof netResult.inflightAtEnd === "number" ? netResult.inflightAtEnd : "—"}
-              </div>
-            </div>
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8 }}>
-            {typeof netResult.windowMs === "number" && (
-              <Badge tone="slate">窗口 {netResult.windowMs} ms</Badge>
-            )}
-            {typeof netResult.slowThresholdMs === "number" && (
-              <Badge tone="slate">慢阈值 {netResult.slowThresholdMs} ms</Badge>
-            )}
-            {netResult.truncated && <Badge tone="amber">跟踪已截断</Badge>}
-            {netResult.stripQuery === false && <Badge tone="slate">保留 query</Badge>}
-          </div>
-          {Array.isArray(netResult.slowRequests) && netResult.slowRequests.length > 0 ? (
-            <div style={{ overflowX: "auto" }}>
-              <table
-                style={{
-                  width: "100%",
-                  borderCollapse: "collapse",
-                  fontSize: 11,
-                  background: "#fff",
-                  border: `1px solid ${OBS_PALETTE.border}`,
-                  borderRadius: 8,
-                  overflow: "hidden",
-                }}
-              >
-                <thead>
-                  <tr style={{ background: "#f1f5f9", color: "#475569", textAlign: "left" }}>
-                    <th style={{ padding: "8px 10px", fontWeight: 600 }}>方法</th>
-                    <th style={{ padding: "8px 10px", fontWeight: 600 }}>耗时 (ms)</th>
-                    <th style={{ padding: "8px 10px", fontWeight: 600 }}>状态</th>
-                    <th style={{ padding: "8px 10px", fontWeight: 600 }}>URL</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {netResult.slowRequests.map((row, i) => (
-                    <tr key={i} style={{ borderTop: `1px solid ${OBS_PALETTE.border}` }}>
-                      <td style={{ padding: "8px 10px", fontFamily: "ui-monospace, monospace", whiteSpace: "nowrap" }}>
-                        {row.method ?? "—"}
-                      </td>
-                      <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
-                        {typeof row.durationMs === "number" ? Math.round(row.durationMs) : "—"}
-                      </td>
-                      <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
-                        {row.status !== undefined ? String(row.status) : "—"}
-                      </td>
-                      <td
-                        style={{
-                          padding: "8px 10px",
-                          wordBreak: "break-all",
-                          color: "#334155",
-                          lineHeight: 1.4,
-                        }}
-                      >
-                        {row.url ?? "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div
-              style={{
-                padding: 12,
-                borderRadius: 8,
-                fontSize: 12,
-                color: OBS_PALETTE.textMuted,
-                background: "#f8fafc",
-                border: `1px dashed ${OBS_PALETTE.border}`,
-              }}
-            >
-              本窗口内无达到慢阈值的已完成请求（可缩短窗口或调低慢请求阈值后重试）。
-            </div>
-          )}
-        </div>
-      )}
-      {netErr && (
-        <div
-          style={{
-            marginBottom: 10,
-            padding: 10,
-            borderRadius: 8,
-            background: "#fef2f2",
-            fontSize: 11,
-            color: "#991b1b",
-            lineHeight: 1.45,
-          }}
-        >
-          HTTPS 观测：{netErr}
-        </div>
-      )}
-      {stackResult !== null && (
-        <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 11, color: OBS_PALETTE.textMuted, marginBottom: 8 }}>
-            异常与调用栈（<code style={{ fontSize: 10 }}>runtime-exception</code>）
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8 }}>
-            {typeof stackResult.waitMs === "number" && <Badge tone="slate">监听 {stackResult.waitMs} ms</Badge>}
-            {stackResult.textTruncated && <Badge tone="amber">异常文案已截断</Badge>}
-          </div>
-          {typeof stackResult.text === "string" && stackResult.text.length > 0 && (
-            <pre
-              style={{
-                margin: "0 0 10px",
-                maxHeight: 160,
-                overflow: "auto",
-                padding: 10,
-                borderRadius: 8,
-                fontSize: 11,
-                lineHeight: 1.45,
-                background: "#fff7ed",
-                border: "1px solid #fed7aa",
-                color: "#9a3412",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-                fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-              }}
-            >
-              {stackResult.text}
-            </pre>
-          )}
-          {typeof stackResult.note === "string" && stackResult.note.length > 0 && (
-            <p style={{ margin: "0 0 8px", fontSize: 11, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
-              {stackResult.note}
-            </p>
-          )}
-          {Array.isArray(stackResult.frames) && stackResult.frames.length > 0 ? (
-            <div style={{ overflowX: "auto" }}>
-              <table
-                style={{
-                  width: "100%",
-                  borderCollapse: "collapse",
-                  fontSize: 11,
-                  background: "#fff",
-                  border: `1px solid ${OBS_PALETTE.border}`,
-                  borderRadius: 8,
-                  overflow: "hidden",
-                }}
-              >
-                <thead>
-                  <tr style={{ background: "#fef3c7", color: "#92400e", textAlign: "left" }}>
-                    <th style={{ padding: "8px 10px", fontWeight: 600, width: 36 }}>#</th>
-                    <th style={{ padding: "8px 10px", fontWeight: 600 }}>函数</th>
-                    <th style={{ padding: "8px 10px", fontWeight: 600 }}>行</th>
-                    <th style={{ padding: "8px 10px", fontWeight: 600 }}>列</th>
-                    <th style={{ padding: "8px 10px", fontWeight: 600 }}>URL</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {stackResult.frames.map((fr, i) => (
-                    <tr key={i} style={{ borderTop: `1px solid ${OBS_PALETTE.border}` }}>
-                      <td style={{ padding: "8px 10px", color: OBS_PALETTE.textMuted }}>{i}</td>
-                      <td
-                        style={{
-                          padding: "8px 10px",
-                          fontFamily: "ui-monospace, monospace",
-                          wordBreak: "break-word",
-                          color: "#0f172a",
-                        }}
-                      >
-                        {fr.functionName && fr.functionName.length > 0 ? fr.functionName : "(anonymous)"}
-                      </td>
-                      <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
-                        {fr.lineNumber !== undefined ? String(fr.lineNumber) : "—"}
-                      </td>
-                      <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
-                        {fr.columnNumber !== undefined ? String(fr.columnNumber) : "—"}
-                      </td>
-                      <td
-                        style={{
-                          padding: "8px 10px",
-                          wordBreak: "break-all",
-                          color: "#334155",
-                          lineHeight: 1.4,
-                        }}
-                      >
-                        {fr.url && fr.url.length > 0 ? fr.url : "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div
-              style={{
-                padding: 12,
-                borderRadius: 8,
-                fontSize: 12,
-                color: OBS_PALETTE.textMuted,
-                background: "#fffbeb",
-                border: `1px dashed ${OBS_PALETTE.border}`,
-              }}
-            >
-              监听窗口内未捕获到新的异常（可在页面触发报错后重试，或拉长「异常栈监听 ms」）。
-            </div>
-          )}
-        </div>
-      )}
-      {stackErr && (
-        <div
-          style={{
-            marginBottom: 10,
-            padding: 10,
-            borderRadius: 8,
-            background: "#fef2f2",
-            fontSize: 11,
-            color: "#991b1b",
-            lineHeight: 1.45,
-          }}
-        >
-          异常栈：{stackErr}
-        </div>
-      )}
       {globalsText !== null && (
         <div style={{ marginBottom: 10 }}>
           <div style={{ fontSize: 11, color: OBS_PALETTE.textMuted, marginBottom: 6 }}>
@@ -2231,6 +1774,20 @@ function PageTargetScreenshot({
   );
 }
 
+/** 窗口列表筛选：空格分隔多关键词，均须在 title/url/targetId/nodeId/type 的合并文本中出现（子串、不区分大小写） */
+function topologyNodeMatchesFilter(
+  n: { nodeId?: string; targetId?: string; type?: string; title?: string; url?: string },
+  query: string,
+): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  const hay = [n.title, n.url, n.targetId, n.nodeId, n.type]
+    .map((s) => String(s ?? "").toLowerCase())
+    .join(" ");
+  const parts = q.split(/\s+/).filter(Boolean);
+  return parts.every((part) => hay.includes(part));
+}
+
 function TopologyVisual({
   raw,
   snapshotCtx,
@@ -2238,7 +1795,8 @@ function TopologyVisual({
   raw: string;
   snapshotCtx?: TopologySnapshotContext | null;
 }) {
-  let data: {
+  const [windowListFilter, setWindowListFilter] = useState("");
+  type TopoPayload = {
     schemaVersion?: number;
     sessionId?: string;
     partial?: boolean;
@@ -2251,14 +1809,33 @@ function TopologyVisual({
       url: string;
     }>;
   };
-  try {
-    data = JSON.parse(raw) as typeof data;
-  } catch {
+  const parsed = useMemo((): { ok: true; data: TopoPayload } | { ok: false } => {
+    try {
+      return { ok: true, data: JSON.parse(raw) as TopoPayload };
+    } catch {
+      return { ok: false };
+    }
+  }, [raw]);
+
+  const nodes = useMemo(() => {
+    if (!parsed.ok) return [];
+    const n = parsed.data.nodes;
+    return Array.isArray(n) ? n : [];
+  }, [parsed]);
+
+  const filteredNodes = useMemo(
+    () => nodes.filter((n) => topologyNodeMatchesFilter(n, windowListFilter)),
+    [nodes, windowListFilter],
+  );
+  const filterActive = windowListFilter.trim().length > 0;
+
+  if (!parsed.ok) {
     return (
       <pre style={{ margin: 0, padding: 14, fontSize: 12, whiteSpace: "pre-wrap" }}>{raw}</pre>
     );
   }
-  const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+
+  const data = parsed.data;
   return (
     <div style={{ padding: 14 }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 12 }}>
@@ -2266,8 +1843,64 @@ function TopologyVisual({
         {typeof data.schemaVersion === "number" && (
           <Badge tone="slate">schema v{data.schemaVersion}</Badge>
         )}
-        {nodes.length > 0 && <Badge tone="blue">{nodes.length} 个 target</Badge>}
+        {nodes.length > 0 && (
+          <Badge tone="blue">
+            {filterActive ? `显示 ${filteredNodes.length} / ${nodes.length} 个 target` : `${nodes.length} 个 target`}
+          </Badge>
+        )}
       </div>
+      {nodes.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <label
+            style={{
+              display: "block",
+              fontSize: 11,
+              fontWeight: 600,
+              color: OBS_PALETTE.textMuted,
+              marginBottom: 6,
+            }}
+          >
+            筛选窗口
+          </label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+            <input
+              type="search"
+              value={windowListFilter}
+              onChange={(e) => setWindowListFilter(e.target.value)}
+              placeholder="标题、URL、targetId、类型等；空格表示同时包含"
+              aria-label="筛选窗口列表"
+              style={{
+                flex: "1 1 220px",
+                minWidth: 180,
+                maxWidth: 480,
+                padding: "8px 12px",
+                fontSize: 12,
+                borderRadius: 8,
+                border: `1px solid ${OBS_PALETTE.border}`,
+                background: "#fff",
+                color: "#0f172a",
+              }}
+            />
+            {filterActive && (
+              <button
+                type="button"
+                onClick={() => setWindowListFilter("")}
+                style={{
+                  padding: "8px 12px",
+                  fontSize: 12,
+                  borderRadius: 8,
+                  border: `1px solid ${OBS_PALETTE.border}`,
+                  background: OBS_PALETTE.bgHover,
+                  cursor: "pointer",
+                  color: "#334155",
+                }}
+              >
+                清除
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {Array.isArray(data.warnings) && data.warnings.length > 0 && (
         <ul style={{ margin: "0 0 12px", paddingLeft: 18, fontSize: 12, color: "#92400e" }}>
           {data.warnings.map((w) => (
@@ -2277,12 +1910,12 @@ function TopologyVisual({
       )}
       {snapshotCtx && nodes.some((n) => n.type === "page") && (
         <p style={{ margin: "0 0 12px", fontSize: 12, color: OBS_PALETTE.textMuted, lineHeight: 1.5 }}>
-          每个 <strong>page</strong> 卡片顶部可「截取页面」「DOM 结构」「控制台」「HTTPS 观测」「异常栈」：对应{" "}
+          每个 <strong>page</strong> 卡片顶部可「截取页面」「DOM 结构」「控制台」「探索」等 Agent 采样：对应{" "}
           <code style={{ fontSize: 11 }}>screenshot</code> / <code style={{ fontSize: 11 }}>dom</code> /{" "}
-          <code style={{ fontSize: 11 }}>console-messages</code> / <code style={{ fontSize: 11 }}>network-observe</code> /{" "}
-          <code style={{ fontSize: 11 }}>runtime-exception</code>
-          （默认不自动拉取）。下方「DevTools 附加」提供 <code style={{ fontSize: 11 }}>chrome://inspect</code>{" "}
-          用直连端口、CDP 网关、<code style={{ fontSize: 11 }}>devtools://</code>（须复制到 Chrome 地址栏）。宿主窗口尺寸/前置等依赖 Electron CDP 扩展，<strong>纯 Web Studio 不提供</strong>。<strong>实时观测</strong>在<strong>右侧抽屉</strong>展示控制台 / HTTPS / 异常栈 SSE（平时收起；点右下角「实时观测」或卡片内对应按钮）。短时「控制台 / HTTPS / 异常栈」按钮仍为窗口采样。需 Core
+          <code style={{ fontSize: 11 }}>console-messages</code> / <code style={{ fontSize: 11 }}>explore</code>
+          （默认不自动拉取）。<strong>HTTPS 与异常栈</strong>请用卡片内「打开 HTTPS 流」「打开异常栈流」在<strong>右侧抽屉</strong>看 SSE。
+          下方「DevTools 附加」提供 <code style={{ fontSize: 11 }}>chrome://inspect</code>{" "}
+          用直连端口、CDP 网关、<code style={{ fontSize: 11 }}>devtools://</code>（须复制到 Chrome 地址栏）。宿主窗口尺寸/前置等依赖 Electron CDP 扩展，<strong>纯 Web Studio 不提供</strong>。需 Core
           开启 Agent API（可用 <code style={{ fontSize: 11 }}>OPENDESKTOP_AGENT_API=0</code> 关闭）。
           若出现 <code style={{ fontSize: 11 }}>Unknown action: dom</code>，说明运行的 Core 仍是旧构建：请在{" "}
           <code style={{ fontSize: 11 }}>packages/core</code> 执行 <code style={{ fontSize: 11 }}>yarn build</code>{" "}
@@ -2292,6 +1925,26 @@ function TopologyVisual({
       )}
       {nodes.length === 0 ? (
         <p style={{ margin: 0, fontSize: 13, color: OBS_PALETTE.textMuted }}>暂无 CDP target 或未能拉取列表。</p>
+      ) : filteredNodes.length === 0 ? (
+        <p style={{ margin: 0, fontSize: 13, color: OBS_PALETTE.textMuted }}>
+          无匹配窗口，请调整筛选条件或
+          <button
+            type="button"
+            onClick={() => setWindowListFilter("")}
+            style={{
+              marginLeft: 6,
+              padding: "2px 8px",
+              fontSize: 12,
+              borderRadius: 6,
+              border: `1px solid ${OBS_PALETTE.border}`,
+              background: "#fff",
+              cursor: "pointer",
+              color: OBS_PALETTE.accentTopo,
+            }}
+          >
+            清除筛选
+          </button>
+        </p>
       ) : (
         <div
           style={{
@@ -2300,7 +1953,7 @@ function TopologyVisual({
             gap: 10,
           }}
         >
-          {nodes.map((n, i) => (
+          {filteredNodes.map((n, i) => (
             <div
               key={n.nodeId || n.targetId || i}
               style={{
