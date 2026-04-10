@@ -44,6 +44,34 @@ type OdProfile = {
   allowScriptExecution?: boolean;
 };
 
+/** GET/POST `/v1/apps/:appId/user-scripts` — 与 Core 持久化结构一致 */
+type OdUserScript = {
+  id: string;
+  appId: string;
+  source: string;
+  metadata: {
+    name: string;
+    namespace?: string;
+    version?: string;
+    description?: string;
+    author?: string;
+    matches: string[];
+    grant: string;
+  };
+  updatedAt: string;
+};
+
+const DEFAULT_USER_SCRIPT = `// ==UserScript==
+// @name         新脚本
+// @namespace    https://opendesktop.local/
+// @version      1.0
+// @description  
+// @match        https://example.com/*
+// @grant        none
+// ==/UserScript==
+
+`;
+
 /** `POST …/actions` 中 `network-observe` 成功响应（与 Core JSON 对齐，供 Studio 展示） */
 type NetworkObserveUiPayload = {
   schemaVersion?: number;
@@ -2526,6 +2554,14 @@ export function App() {
   const [selectedProfileByApp, setSelectedProfileByApp] = useState<Record<string, string>>({});
   const [appBusyId, setAppBusyId] = useState<string | null>(null);
   const [appActionMsg, setAppActionMsg] = useState<Record<string, string>>({});
+  /** 已注册应用 — 用户脚本弹层 */
+  const [userScriptAppId, setUserScriptAppId] = useState<string | null>(null);
+  const [userScriptList, setUserScriptList] = useState<OdUserScript[]>([]);
+  const [userScriptListLoading, setUserScriptListLoading] = useState(false);
+  const [userScriptSelectedId, setUserScriptSelectedId] = useState<string | null>(null);
+  const [userScriptSource, setUserScriptSource] = useState("");
+  const [userScriptBusy, setUserScriptBusy] = useState(false);
+  const [userScriptErr, setUserScriptErr] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailTopo, setDetailTopo] = useState<string | null>(null);
@@ -2733,6 +2769,107 @@ export function App() {
       }));
     } finally {
       setAppBusyId(null);
+    }
+  }
+
+  async function refreshUserScriptList(appId: string): Promise<void> {
+    const res = await fetch(apiUrl(`/v1/apps/${encodeURIComponent(appId)}/user-scripts`), { headers });
+    const raw = await res.text();
+    if (!res.ok) throw new Error(`${res.status}: ${raw.slice(0, 200)}`);
+    const data = JSON.parse(raw) as { scripts?: OdUserScript[] };
+    setUserScriptList(Array.isArray(data.scripts) ? data.scripts : []);
+  }
+
+  function openUserScriptsModal(appId: string) {
+    if (!tokenTrimmed) {
+      setAppActionMsg((m) => ({ ...m, [appId]: "请先填写 Bearer token" }));
+      return;
+    }
+    setUserScriptAppId(appId);
+    setUserScriptErr(null);
+    setUserScriptSelectedId(null);
+    setUserScriptSource(DEFAULT_USER_SCRIPT);
+    setUserScriptListLoading(true);
+    void (async () => {
+      try {
+        await refreshUserScriptList(appId);
+      } catch (e) {
+        setUserScriptErr(e instanceof Error ? e.message : String(e));
+        setUserScriptList([]);
+      } finally {
+        setUserScriptListLoading(false);
+      }
+    })();
+  }
+
+  function closeUserScriptsModal() {
+    setUserScriptAppId(null);
+    setUserScriptErr(null);
+    setUserScriptList([]);
+    setUserScriptSelectedId(null);
+    setUserScriptSource("");
+  }
+
+  async function saveUserScriptDraft() {
+    if (!userScriptAppId) return;
+    setUserScriptBusy(true);
+    setUserScriptErr(null);
+    try {
+      const basePath = `/v1/apps/${encodeURIComponent(userScriptAppId)}/user-scripts`;
+      const path = userScriptSelectedId
+        ? `${basePath}/${encodeURIComponent(userScriptSelectedId)}`
+        : basePath;
+      const res = await fetch(apiUrl(path), {
+        method: userScriptSelectedId ? "PATCH" : "POST",
+        headers,
+        body: JSON.stringify({ source: userScriptSource }),
+      });
+      const raw = await res.text();
+      if (!res.ok) {
+        let msg = raw.slice(0, 400);
+        try {
+          const j = JSON.parse(raw) as { error?: { code?: string; message?: string } };
+          if (j.error?.message) {
+            msg = j.error.code ? `${j.error.code}: ${j.error.message}` : j.error.message;
+          }
+        } catch {
+          /* keep msg */
+        }
+        throw new Error(msg);
+      }
+      const data = JSON.parse(raw) as { script?: OdUserScript };
+      if (data.script) {
+        setUserScriptSelectedId(data.script.id);
+        setUserScriptSource(data.script.source);
+      }
+      await refreshUserScriptList(userScriptAppId);
+    } catch (e) {
+      setUserScriptErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setUserScriptBusy(false);
+    }
+  }
+
+  async function deleteSelectedUserScript() {
+    if (!userScriptAppId || !userScriptSelectedId) return;
+    setUserScriptBusy(true);
+    setUserScriptErr(null);
+    try {
+      const res = await fetch(
+        apiUrl(
+          `/v1/apps/${encodeURIComponent(userScriptAppId)}/user-scripts/${encodeURIComponent(userScriptSelectedId)}`,
+        ),
+        { method: "DELETE", headers },
+      );
+      const raw = await res.text();
+      if (!res.ok) throw new Error(`${res.status}: ${raw.slice(0, 200)}`);
+      setUserScriptSelectedId(null);
+      setUserScriptSource(DEFAULT_USER_SCRIPT);
+      await refreshUserScriptList(userScriptAppId);
+    } catch (e) {
+      setUserScriptErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setUserScriptBusy(false);
     }
   }
 
@@ -3265,6 +3402,28 @@ export function App() {
                                     </>
                                   )}
                                 </button>
+                                <button
+                                  type="button"
+                                  disabled={busy || !tokenTrimmed}
+                                  title="按应用保存 UserScript 元数据；@match 仅存不用，不自动注入页面"
+                                  onClick={() => openUserScriptsModal(a.id)}
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    minHeight: 28,
+                                    padding: "4px 10px",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    cursor: busy || !tokenTrimmed ? "not-allowed" : "pointer",
+                                    borderRadius: 6,
+                                    border: `1px solid ${OBS_PALETTE.border}`,
+                                    background: busy || !tokenTrimmed ? "#f1f5f9" : "#fff",
+                                    color: busy || !tokenTrimmed ? OBS_PALETTE.textMuted : "#334155",
+                                  }}
+                                >
+                                  脚本
+                                </button>
                               </div>
                             </td>
                           </tr>
@@ -3592,6 +3751,276 @@ export function App() {
           </div>
         </div>
       </div>
+      {userScriptAppId && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="od-user-script-title"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            background: "rgba(15,23,42,0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            boxSizing: "border-box",
+          }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) closeUserScriptsModal();
+          }}
+        >
+          <div
+            style={{
+              width: "min(960px, 100%)",
+              height: "min(92vh, 900px)",
+              maxHeight: "min(92vh, 900px)",
+              background: "#fff",
+              borderRadius: 12,
+              border: `1px solid ${OBS_PALETTE.border}`,
+              boxShadow: "0 20px 50px rgba(15,23,42,0.18)",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                justifyContent: "space-between",
+                gap: 12,
+                padding: "12px 16px",
+                borderBottom: `1px solid ${OBS_PALETTE.border}`,
+                background: "#f8fafc",
+                flexShrink: 0,
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div id="od-user-script-title" style={{ fontWeight: 700, fontSize: 15, color: "#0f172a" }}>
+                  用户脚本 · {userScriptAppId}
+                </div>
+                <div style={{ fontSize: 11, color: OBS_PALETTE.textMuted, marginTop: 4, lineHeight: 1.4 }}>
+                  `@match` 等元数据会保存，但<strong>当前不会</strong>用于 URL 匹配或自动注入；SPA 场景见 README。
+                </div>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, flexShrink: 0, alignItems: "center" }}>
+                <button
+                  type="button"
+                  disabled={userScriptBusy || !userScriptSource.trim()}
+                  onClick={() => void saveUserScriptDraft()}
+                  style={{
+                    padding: "8px 16px",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    borderRadius: 8,
+                    border: `1px solid ${OBS_PALETTE.borderActive}`,
+                    background:
+                      userScriptBusy || !userScriptSource.trim() ? "#e2e8f0" : "#2563eb",
+                    color: userScriptBusy || !userScriptSource.trim() ? "#94a3b8" : "#fff",
+                    cursor: userScriptBusy || !userScriptSource.trim() ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {userScriptBusy ? "保存中…" : "保存"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => closeUserScriptsModal()}
+                  style={{
+                    padding: "8px 14px",
+                    fontSize: 13,
+                    borderRadius: 8,
+                    border: `1px solid ${OBS_PALETTE.border}`,
+                    background: "#fff",
+                    cursor: "pointer",
+                  }}
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+            <div
+              style={{
+                display: "flex",
+                flex: 1,
+                minHeight: 0,
+                gap: 0,
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: 220,
+                  flexShrink: 0,
+                  borderRight: `1px solid ${OBS_PALETTE.border}`,
+                  overflow: "auto",
+                  padding: "10px 8px",
+                  background: "#fafafa",
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 600, color: OBS_PALETTE.textMuted, marginBottom: 8 }}>
+                  已保存
+                </div>
+                {userScriptListLoading ? (
+                  <div style={{ fontSize: 12, color: OBS_PALETTE.textMuted }}>加载中…</div>
+                ) : userScriptList.length === 0 ? (
+                  <div style={{ fontSize: 12, color: OBS_PALETTE.textMuted }}>暂无，点右侧「新建」或编辑后保存</div>
+                ) : (
+                  <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                    {userScriptList.map((s) => (
+                      <li key={s.id} style={{ marginBottom: 4 }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUserScriptSelectedId(s.id);
+                            setUserScriptSource(s.source);
+                            setUserScriptErr(null);
+                          }}
+                          style={{
+                            width: "100%",
+                            textAlign: "left",
+                            padding: "8px 10px",
+                            fontSize: 12,
+                            borderRadius: 8,
+                            border:
+                              userScriptSelectedId === s.id
+                                ? `1px solid ${OBS_PALETTE.borderActive}`
+                                : `1px solid transparent`,
+                            background: userScriptSelectedId === s.id ? "#eff6ff" : "#fff",
+                            cursor: "pointer",
+                            wordBreak: "break-word",
+                          }}
+                        >
+                          <span style={{ fontWeight: 600, color: "#0f172a" }}>{s.metadata.name}</span>
+                          {s.metadata.matches.length > 0 && (
+                            <span style={{ display: "block", fontSize: 10, color: OBS_PALETTE.textMuted, marginTop: 2 }}>
+                              {s.metadata.matches.length} 条 @match
+                            </span>
+                          )}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div
+                style={{
+                  flex: 1,
+                  display: "flex",
+                  flexDirection: "column",
+                  minWidth: 0,
+                  minHeight: 0,
+                  padding: 12,
+                  overflow: "hidden",
+                }}
+              >
+                <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <textarea
+                    className="od-input"
+                    value={userScriptSource}
+                    onChange={(e) => setUserScriptSource(e.target.value)}
+                    spellCheck={false}
+                    placeholder="完整 .user.js 源文"
+                    style={{
+                      flex: 1,
+                      minHeight: 120,
+                      width: "100%",
+                      resize: "none",
+                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                      fontSize: 12,
+                      lineHeight: 1.45,
+                      marginTop: 0,
+                      overflow: "auto",
+                    }}
+                  />
+                  {userScriptErr && (
+                    <div
+                      style={{
+                        flexShrink: 0,
+                        padding: "8px 10px",
+                        fontSize: 12,
+                        color: "#991b1b",
+                        background: "#fef2f2",
+                        borderRadius: 8,
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {userScriptErr}
+                    </div>
+                  )}
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: 8,
+                    marginTop: 10,
+                    paddingTop: 10,
+                    borderTop: `1px solid ${OBS_PALETTE.border}`,
+                    flexShrink: 0,
+                  }}
+                >
+                  <button
+                    type="button"
+                    disabled={userScriptBusy || !userScriptSource.trim()}
+                    onClick={() => void saveUserScriptDraft()}
+                    style={{
+                      padding: "8px 16px",
+                      fontSize: 13,
+                      fontWeight: 700,
+                      borderRadius: 8,
+                      border: `1px solid ${OBS_PALETTE.borderActive}`,
+                      background:
+                        userScriptBusy || !userScriptSource.trim() ? "#e2e8f0" : "#2563eb",
+                      color: userScriptBusy || !userScriptSource.trim() ? "#94a3b8" : "#fff",
+                      cursor: userScriptBusy || !userScriptSource.trim() ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    {userScriptBusy ? "保存中…" : "保存"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={userScriptBusy}
+                    onClick={() => {
+                      setUserScriptSelectedId(null);
+                      setUserScriptSource(DEFAULT_USER_SCRIPT);
+                      setUserScriptErr(null);
+                    }}
+                    style={{
+                      padding: "8px 14px",
+                      fontSize: 12,
+                      borderRadius: 8,
+                      border: `1px solid ${OBS_PALETTE.border}`,
+                      background: "#fff",
+                      cursor: userScriptBusy ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    新建草稿
+                  </button>
+                  <button
+                    type="button"
+                    disabled={userScriptBusy || !userScriptSelectedId}
+                    onClick={() => void deleteSelectedUserScript()}
+                    style={{
+                      padding: "8px 14px",
+                      fontSize: 12,
+                      borderRadius: 8,
+                      border: "1px solid #fca5a5",
+                      background: userScriptBusy || !userScriptSelectedId ? "#f1f5f9" : "#fef2f2",
+                      color: userScriptBusy || !userScriptSelectedId ? OBS_PALETTE.textMuted : "#b91c1c",
+                      cursor: userScriptBusy || !userScriptSelectedId ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       </LiveConsoleDockLayout>
     </div>
   );

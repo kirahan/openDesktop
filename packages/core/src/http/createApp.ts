@@ -1,5 +1,6 @@
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import httpProxy from "http-proxy";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import type { CoreConfig } from "../config.js";
@@ -25,6 +26,8 @@ import {
 } from "../cdp/runtimeExceptionStream.js";
 import { listAgentActionNamesForVersion } from "./agentActionAliases.js";
 import { registerObservabilityRoutes } from "./registerObservability.js";
+import { parseUserScriptSource } from "../userScripts/parseUserScriptMetadata.js";
+import type { UserScriptRecord } from "../userScripts/types.js";
 
 export interface AppDeps {
   config: CoreConfig;
@@ -152,6 +155,102 @@ export function createApp(deps: AppDeps): CreateAppResult {
     data.apps.push(appDef);
     await store.writeApps(data.apps);
     res.status(201).json({ app: appDef });
+  });
+
+  async function appExists(appId: string): Promise<boolean> {
+    const data = await store.readApps();
+    return data.apps.some((a) => a.id === appId);
+  }
+
+  /** 用户脚本（按 app）；`@match` 仅存储，不用于 URL 匹配或自动注入。 */
+  v1.get("/apps/:appId/user-scripts", async (req, res) => {
+    const { appId } = req.params;
+    if (!(await appExists(appId))) {
+      return jsonError(res, 404, "APP_NOT_FOUND", "appId does not exist");
+    }
+    const file = await store.readUserScripts();
+    const scripts = file.scripts.filter((s) => s.appId === appId);
+    res.json({ scripts });
+  });
+
+  v1.post("/apps/:appId/user-scripts", async (req, res) => {
+    const { appId } = req.params;
+    if (!(await appExists(appId))) {
+      return jsonError(res, 404, "APP_NOT_FOUND", "appId does not exist");
+    }
+    const body = req.body as { source?: string };
+    if (typeof body.source !== "string" || !body.source.trim()) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "source required");
+    }
+    const parsed = parseUserScriptSource(body.source);
+    if (!parsed.ok) {
+      return jsonError(res, 400, parsed.code, parsed.message);
+    }
+    const file = await store.readUserScripts();
+    const now = new Date().toISOString();
+    const rec: UserScriptRecord = {
+      id: randomUUID(),
+      appId,
+      source: body.source,
+      metadata: parsed.metadata,
+      updatedAt: now,
+    };
+    file.scripts.push(rec);
+    await store.writeUserScripts(file.scripts);
+    res.status(201).json({ script: rec });
+  });
+
+  v1.get("/apps/:appId/user-scripts/:scriptId", async (req, res) => {
+    const { appId, scriptId } = req.params;
+    if (!(await appExists(appId))) {
+      return jsonError(res, 404, "APP_NOT_FOUND", "appId does not exist");
+    }
+    const file = await store.readUserScripts();
+    const script = file.scripts.find((s) => s.id === scriptId && s.appId === appId);
+    if (!script) return jsonError(res, 404, "USER_SCRIPT_NOT_FOUND", "script not found");
+    res.json({ script });
+  });
+
+  v1.patch("/apps/:appId/user-scripts/:scriptId", async (req, res) => {
+    const { appId, scriptId } = req.params;
+    if (!(await appExists(appId))) {
+      return jsonError(res, 404, "APP_NOT_FOUND", "appId does not exist");
+    }
+    const body = req.body as { source?: string };
+    if (typeof body.source !== "string" || !body.source.trim()) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "source required");
+    }
+    const parsed = parseUserScriptSource(body.source);
+    if (!parsed.ok) {
+      return jsonError(res, 400, parsed.code, parsed.message);
+    }
+    const file = await store.readUserScripts();
+    const idx = file.scripts.findIndex((s) => s.id === scriptId && s.appId === appId);
+    if (idx < 0) return jsonError(res, 404, "USER_SCRIPT_NOT_FOUND", "script not found");
+    const now = new Date().toISOString();
+    const updated: UserScriptRecord = {
+      ...file.scripts[idx]!,
+      source: body.source,
+      metadata: parsed.metadata,
+      updatedAt: now,
+    };
+    file.scripts[idx] = updated;
+    await store.writeUserScripts(file.scripts);
+    res.json({ script: updated });
+  });
+
+  v1.delete("/apps/:appId/user-scripts/:scriptId", async (req, res) => {
+    const { appId, scriptId } = req.params;
+    if (!(await appExists(appId))) {
+      return jsonError(res, 404, "APP_NOT_FOUND", "appId does not exist");
+    }
+    const file = await store.readUserScripts();
+    const next = file.scripts.filter((s) => !(s.id === scriptId && s.appId === appId));
+    if (next.length === file.scripts.length) {
+      return jsonError(res, 404, "USER_SCRIPT_NOT_FOUND", "script not found");
+    }
+    await store.writeUserScripts(next);
+    res.status(204).send();
   });
 
   v1.get("/profiles", async (_req, res) => {

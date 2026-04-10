@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  applyLoadingFailed,
   applyLoadingFinished,
   applyRequestWillBeSent,
   applyResponseReceived,

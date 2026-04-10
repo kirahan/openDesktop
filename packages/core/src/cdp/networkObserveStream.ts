@@ -39,7 +39,7 @@ export function allowNetworkSseEmitPerSecond(
   maxPerSecond: number,
 ): { allowed: boolean; state: { secondEpoch: number; countInSecond: number } } {
   const epoch = Math.floor(Date.now() / 1000);
-  let countInSecond = state.countInSecond;
+  const countInSecond = state.countInSecond;
   if (epoch !== state.secondEpoch) {
     return { allowed: true, state: { secondEpoch: epoch, countInSecond: 1 } };
   }

@@ -118,6 +118,20 @@ yarn od -- doctor --app demo-mock
 
 更底层的 HTTP 示例见源码测试与下方 Playwright 说明。
 
+### 按应用用户脚本（UserScript 元数据存储）
+
+将油猴风格 **`// ==UserScript==` … `// ==/UserScript==`** 块写入 Core，按 **`appId`** 归属持久化（文件：`<dataDir>/user-scripts.json`）。解析后的 **`metadata.matches`** 为 **`@match` 原文列表**。**当前版本不根据 `@match` 做 URL 过滤、不自动注入页面**（仅存储，避免与 SPA 客户端路由语义混淆；后续若做「按地址自动执行」需单独设计；行为见 `openspec/specs/app-user-scripts/spec.md`，历史设计见 `openspec/changes/archive/2026-04-10-app-user-scripts-metadata/design.md`）。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/v1/apps/:appId/user-scripts` | Body：`{ "source": "<完整 .user.js 文本>" }`；成功 **201**，响应含 `script.metadata.matches` |
+| `GET` | `/v1/apps/:appId/user-scripts` | 列出该 app 下脚本 |
+| `GET` | `/v1/apps/:appId/user-scripts/:scriptId` | 单条 |
+| `PATCH` | `/v1/apps/:appId/user-scripts/:scriptId` | Body：`{ "source": "..." }` |
+| `DELETE` | `/v1/apps/:appId/user-scripts/:scriptId` | 成功 **204** |
+
+**`@grant`** 仅允许 **`none`**（或可省略）；否则返回 **`USER_SCRIPT_GRANT_NOT_SUPPORTED`**。缺少 **`@name`** 返回 **`USER_SCRIPT_VALIDATION_ERROR`**。均需 **Bearer**。
+
 ## 安全说明
 
 - Core **默认只监听 127.0.0.1**，请勿在未配置防火墙时绑定 `0.0.0.0`。

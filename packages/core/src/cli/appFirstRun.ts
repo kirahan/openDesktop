@@ -33,8 +33,8 @@ async function resolveTargetForAppFirst(
   sessionId: string,
   writeErr: (s: string) => void,
 ): Promise<{ ok: true; targetId: string } | { ok: false; exit: number }> {
-  let targetId = parsed.targetId?.trim() ?? "";
-  if (targetId) return { ok: true, targetId };
+  const trimmed = parsed.targetId?.trim() ?? "";
+  if (trimmed) return { ok: true, targetId: trimmed };
   const topoRes = await fetchWithBearer(httpCtx, "GET", `/v1/sessions/${sessionId}/list-window`);
   if (!topoRes.ok) {
     const errText = await topoRes.text();
