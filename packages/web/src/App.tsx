@@ -563,22 +563,27 @@ function pageInspectorBtnStyle(loading: boolean): React.CSSProperties {
   };
 }
 
-/** 右侧抽屉内 SSE 类型：与 Core `GET .../console|network|runtime-exception|proxy/stream` 对齐 */
-type ObservabilityStreamKind = "console" | "network" | "exception" | "proxy";
+/** 右侧抽屉内 SSE 类型：与 Core `GET .../console|network|runtime-exception|proxy/stream` 及 `logs/stream` 对齐 */
+type ObservabilityStreamKind = "console" | "network" | "exception" | "proxy" | "mainlog";
 
 /** 本地代理流 tab 用的占位 targetId（非 CDP target） */
 const SESSION_PROXY_TARGET_ID = "__session_proxy__";
 
+/** 子进程 stdout/stderr 日志流 tab 占位（非 CDP target） */
+const SESSION_MAIN_LOG_TARGET_ID = "__session_main_log__";
+
 function observabilityStreamKindLabel(k: ObservabilityStreamKind): string {
   switch (k) {
     case "console":
-      return "日志";
+      return "页面控制台";
     case "network":
       return "HTTPS";
     case "exception":
       return "异常";
     case "proxy":
       return "主进程代理";
+    case "mainlog":
+      return "主进程日志";
     default:
       return k;
   }
@@ -588,13 +593,15 @@ function observabilityStartButtonLabel(kind: ObservabilityStreamKind, running: b
   if (running) return "订阅中…";
   switch (kind) {
     case "console":
-      return "开始实时日志";
+      return "开始页面控制台流";
     case "network":
       return "开始 HTTPS 流";
     case "exception":
       return "开始异常栈流";
     case "proxy":
       return "开始主进程代理流";
+    case "mainlog":
+      return "开始主进程日志流";
     default:
       return "开始";
   }
@@ -610,6 +617,8 @@ function observabilityStreamHint(kind: ObservabilityStreamKind): string {
       return "SSE · uncaught 异常与栈 · 须会话允许脚本执行 allowScriptExecution（否则 HTTP 403）";
     case "proxy":
       return "SSE · 本地转发代理 · HTTP 明文 + HTTPS CONNECT（不解密）· 须应用开启专用代理";
+    case "mainlog":
+      return "SSE · Core 拉起的子进程 stdout/stderr（连接前先推送已有缓冲）· 与渲染进程 DevTools 控制台不是同一路";
     default:
       return "";
   }
@@ -635,6 +644,9 @@ function buildObservabilitySseUrl(
       break;
     case "proxy":
       path = `/v1/sessions/${sessionId}/proxy/stream`;
+      break;
+    case "mainlog":
+      path = `/v1/sessions/${sessionId}/logs/stream`;
       break;
   }
   return apiRoot ? `${apiRoot.replace(/\/$/, "")}${path}` : path;
@@ -818,6 +830,13 @@ function LiveConsoleDockLayout({
               continue;
             }
             try {
+              if (streamKind === "mainlog") {
+                const row = JSON.parse(raw) as { ts?: string; stream?: string; line?: string };
+                const tag = row.stream === "stderr" ? "stderr" : "stdout";
+                const head = row.ts ? `${row.ts} [${tag}]` : `[${tag}]`;
+                pushLine(`${head} ${String(row.line ?? "")}`);
+                continue;
+              }
               if (streamKind === "console") {
                 const entry = JSON.parse(raw) as { type?: string; argsPreview?: string[] };
                 pushLine(`[${entry.type ?? "log"}] ${(entry.argsPreview ?? []).join(" ")}`);
@@ -927,7 +946,7 @@ function LiveConsoleDockLayout({
       });
       setActiveId(id);
       setDrawerOpen(true);
-      if (!existed && (streamKind === "network" || streamKind === "proxy")) {
+      if (!existed && (streamKind === "network" || streamKind === "proxy" || streamKind === "mainlog")) {
         window.setTimeout(
           () => void startStream(id, p.sessionId, p.targetId, streamKind),
           0,
@@ -951,7 +970,7 @@ function LiveConsoleDockLayout({
           type="button"
           aria-label={tabs.length > 0 ? `打开实时观测，已打开 ${tabs.length} 个标签` : "打开实时观测"}
           onClick={() => setDrawerOpen(true)}
-          title={tabs.length > 0 ? `已打开 ${tabs.length} 个标签` : "日志 / HTTPS / 异常栈 SSE"}
+          title={tabs.length > 0 ? `已打开 ${tabs.length} 个标签` : "页面控制台 / 主进程日志 / HTTPS / 异常栈 SSE"}
           style={{
             position: "fixed",
             right: 16,
@@ -1047,7 +1066,7 @@ function LiveConsoleDockLayout({
             <div style={{ padding: 12, fontSize: 12, color: OBS_PALETTE.textMuted }}>填写 Bearer 后可用</div>
           ) : tabs.length === 0 ? (
             <div style={{ padding: 12, fontSize: 12, color: OBS_PALETTE.textMuted, lineHeight: 1.5 }}>
-              在「窗口 / 调试目标」卡片中打开「实时日志 / HTTPS / 异常栈」，或点右下角「实时观测」，可为此 target 新开标签；同一窗口可开多种流（多 tab）。
+              在「窗口 / 调试目标」卡片中打开「页面控制台 / 主进程日志 / HTTPS / 异常栈」，或点右下角「实时观测」，可新开标签；同一窗口可开多种流（多 tab）。
             </div>
           ) : (
             <>
@@ -1511,8 +1530,10 @@ function PageTargetScreenshot({
           >
             <div style={{ fontSize: 11, fontWeight: 600, color: "#475569", marginBottom: 6 }}>实时观测（右侧抽屉）</div>
             <p style={{ margin: "0 0 8px", fontSize: 10, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
-              此处为 <strong>SSE 长连接</strong>（仅连接后的新事件）。可分别打开<strong> 控制台 / HTTPS / 异常栈 </strong>
-              三种标签；限流时会出现 <code style={{ fontSize: 10 }}>[warning]</code>。
+              此处为 <strong>SSE 长连接</strong>。页面控制台流仅含<strong>连接后的</strong>新事件；主进程日志流含 Core
+              已缓冲行并持续推送子进程 stdout/stderr。可分别打开<strong> 页面控制台 / 主进程日志 / HTTPS / 异常栈 /
+              代理 </strong>
+              等标签；HTTPS 限流时会出现 <code style={{ fontSize: 10 }}>[warning]</code>。
             </p>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
               <button
@@ -1527,7 +1548,22 @@ function PageTargetScreenshot({
                 }
                 style={pageInspectorBtnStyle(false)}
               >
-                打开实时日志
+                打开页面控制台流
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  liveDock.openLiveTab({
+                    sessionId: ctx.sessionId,
+                    targetId: SESSION_MAIN_LOG_TARGET_ID,
+                    label: windowTitle,
+                    streamKind: "mainlog",
+                  })
+                }
+                style={pageInspectorBtnStyle(false)}
+                title="SSE：GET /v1/sessions/.../logs/stream（子进程 stdout/stderr）"
+              >
+                打开主进程日志流
               </button>
               <button
                 type="button"
