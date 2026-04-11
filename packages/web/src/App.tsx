@@ -45,7 +45,7 @@ type OdApp = {
   useDedicatedProxy?: boolean;
 };
 
-/** GET /v1/profiles，用于选择 `yarn oc session create <profileId>` 等价参数 */
+/** GET /v1/profiles，启动配置（内部为 Profile；用于 session start 等） */
 type OdProfile = {
   id: string;
   appId: string;
@@ -607,7 +607,7 @@ function observabilityStreamHint(kind: ObservabilityStreamKind): string {
     case "network":
       return "SSE · 每条请求完成事件 · 限流时出现 [warning] · 无 body";
     case "exception":
-      return "SSE · uncaught 异常与栈 · 须 Profile allowScriptExecution（否则 HTTP 403）";
+      return "SSE · uncaught 异常与栈 · 须会话允许脚本执行 allowScriptExecution（否则 HTTP 403）";
     case "proxy":
       return "SSE · 本地转发代理 · HTTP 明文 + HTTPS CONNECT（不解密）· 须应用开启专用代理";
     default:
@@ -1489,8 +1489,7 @@ function PageTargetScreenshot({
         </button>
       </div>
       <p style={{ margin: "0 0 10px", fontSize: 10, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
-        通过 CDP 反射枚举当前 page 的 <code style={{ fontSize: 10 }}>globalThis</code> 属性（需 Profile
-        允许脚本执行）。结果较大时仅作探测用途。
+        通过 CDP 反射枚举当前 page 的 <code style={{ fontSize: 10 }}>globalThis</code> 属性（需会话侧允许脚本执行）。结果较大时仅作探测用途。
       </p>
       <div
         style={{
@@ -2564,12 +2563,12 @@ export function App() {
       const res = await fetch(profilesUrl, { headers: h });
       const raw = await res.text();
       if (!res.ok) {
-        setProfilesErr(`Profile 列表 ${res.status}: ${raw.slice(0, 200)}`);
+        setProfilesErr(`启动配置列表 ${res.status}: ${raw.slice(0, 200)}`);
         setProfiles([]);
         return;
       }
       if (!raw.trimStart().startsWith("{")) {
-        setProfilesErr("Profile 列表返回非 JSON");
+        setProfilesErr("启动配置列表返回非 JSON");
         setProfiles([]);
         return;
       }
@@ -2862,7 +2861,7 @@ export function App() {
           pmsg = profRaw.slice(0, 200);
         }
         setErr(
-          `应用「${id}」已注册，但默认 Profile「${defaultProfileId}」创建失败：${pmsg}。请在本机用 POST /v1/profiles 补建，或删除应用后改用 yarn oc app bootstrap。`,
+          `应用「${id}」已注册，但默认启动配置（id ${defaultProfileId}）创建失败：${pmsg}。请在本机用 POST /v1/profiles 补建，或删除应用后改用 yarn oc app create。`,
         );
         void refreshCoreData();
         closeRegisterAppModal();
@@ -2917,7 +2916,7 @@ export function App() {
     }
     if (
       !window.confirm(
-        `确定删除应用「${appId}」？将停止相关运行中会话，并删除绑定 Profile 与用户脚本记录（不可恢复）。`,
+        `确定删除应用「${appId}」？将停止相关运行中会话，并删除其启动配置与用户脚本记录（不可恢复）。`,
       )
     ) {
       return;
@@ -3187,7 +3186,7 @@ export function App() {
     if (profs.length === 0) {
       setAppActionMsg((m) => ({
         ...m,
-        [appId]: `无可用 Profile：若仅用旧版 Web 注册过应用，请补建 Profile（POST /v1/profiles，例如 id 为 ${appId}-default）；或使用 yarn oc app bootstrap 重新注册。`,
+        [appId]: `无可用启动配置：若仅用旧版 Web 注册过应用，请补建配置（POST /v1/profiles，例如 id 为 ${appId}-default）；或使用 yarn oc app create 重新注册。`,
       }));
       return;
     }
@@ -3550,16 +3549,21 @@ export function App() {
                 fontWeight: 400,
                 flex: "1 1 200px",
                 minWidth: 0,
+                lineHeight: 1.45,
               }}
             >
-              （与 <code style={{ fontSize: 11 }}>yarn oc app list</code> 同源；启动会话等价{" "}
-              <code style={{ fontSize: 11 }}>yarn oc session create &lt;profileId&gt;</code>）
+              Web「注册应用」会创建应用与默认启动配置；CLI 可用{" "}
+              <code style={{ fontSize: 11 }}>yarn oc app create</code>。
             </span>
             <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", flexShrink: 0 }}>
               <button
                 type="button"
                 disabled={!tokenTrimmed}
-                title={!tokenTrimmed ? "请先填写 Bearer token" : "POST /v1/apps，与 yarn oc app create 等价"}
+                title={
+                  !tokenTrimmed
+                    ? "请先填写 Bearer token"
+                    : "依次 POST 应用与默认启动配置，与 yarn oc app create 行为一致"
+                }
                 onClick={() => openRegisterAppModal()}
                 style={{
                   padding: "6px 12px",
@@ -3595,7 +3599,7 @@ export function App() {
                   lineHeight: 1.45,
                 }}
               >
-                {profilesErr}（操作列依赖 Profile 列表；可检查 Core 与 token）
+                {profilesErr}（启动与脚本等依赖上述配置数据；可检查 Core 与 token）
               </div>
             )}
             {appsErr && (
@@ -3619,15 +3623,24 @@ export function App() {
                 <table
                   style={{
                     width: "100%",
-                    minWidth: 900,
+                    minWidth: 720,
                     borderCollapse: "collapse",
                     background: "#fff",
                     tableLayout: "fixed",
                   }}
                 >
+                  <colgroup>
+                    <col style={{ width: "12%" }} />
+                    <col style={{ width: "10%" }} />
+                    <col style={{ width: "28%" }} />
+                    <col style={{ width: "72px" }} />
+                    <col style={{ width: "88px" }} />
+                    <col style={{ width: "14%" }} />
+                    <col style={{ width: "auto", minWidth: 200 }} />
+                  </colgroup>
                   <thead>
                     <tr>
-                      {["ID", "名称", "可执行文件", "工作目录", "CDP 注入", "专用代理", "启动参数", "操作"].map((h) => (
+                      {["ID", "名称", "可执行与工作目录", "CDP 注入", "专用代理", "启动参数", "操作"].map((h) => (
                         <th
                           key={h}
                           style={{
@@ -3649,7 +3662,7 @@ export function App() {
                     {apps.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={8}
+                          colSpan={7}
                           style={{
                             padding: 20,
                             fontSize: 13,
@@ -3707,36 +3720,118 @@ export function App() {
                               {a.name}
                             </td>
                             <td
-                              title={a.executable}
                               style={{
-                                padding: "12px 14px",
-                                fontSize: 11,
-                                color: "#334155",
+                                padding: "8px 10px",
                                 borderBottom: `1px solid #f1f5f9`,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                                verticalAlign: "middle",
-                                fontFamily: "ui-monospace, monospace",
+                                verticalAlign: "top",
                               }}
                             >
-                              {a.executable}
-                            </td>
-                            <td
-                              title={a.cwd}
-                              style={{
-                                padding: "12px 14px",
-                                fontSize: 11,
-                                color: "#64748b",
-                                borderBottom: `1px solid #f1f5f9`,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                                verticalAlign: "middle",
-                                fontFamily: "ui-monospace, monospace",
-                              }}
-                            >
-                              {a.cwd}
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6, maxWidth: "100%" }}>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    minWidth: 0,
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      flexShrink: 0,
+                                      fontSize: 10,
+                                      fontWeight: 600,
+                                      color: OBS_PALETTE.textMuted,
+                                      width: 28,
+                                    }}
+                                  >
+                                    exe
+                                  </span>
+                                  <span
+                                    title={a.executable}
+                                    style={{
+                                      flex: "1 1 0",
+                                      minWidth: 0,
+                                      fontSize: 11,
+                                      color: "#334155",
+                                      fontFamily: "ui-monospace, monospace",
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    {a.executable}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    title="复制可执行文件完整路径"
+                                    onClick={() => void copyToClipboard(a.executable)}
+                                    style={{
+                                      flexShrink: 0,
+                                      padding: "2px 6px",
+                                      fontSize: 10,
+                                      borderRadius: 4,
+                                      border: `1px solid ${OBS_PALETTE.border}`,
+                                      background: "#fff",
+                                      color: "#475569",
+                                      cursor: "pointer",
+                                    }}
+                                  >
+                                    复制
+                                  </button>
+                                </div>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    minWidth: 0,
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      flexShrink: 0,
+                                      fontSize: 10,
+                                      fontWeight: 600,
+                                      color: OBS_PALETTE.textMuted,
+                                      width: 28,
+                                    }}
+                                  >
+                                    cwd
+                                  </span>
+                                  <span
+                                    title={a.cwd}
+                                    style={{
+                                      flex: "1 1 0",
+                                      minWidth: 0,
+                                      fontSize: 11,
+                                      color: "#64748b",
+                                      fontFamily: "ui-monospace, monospace",
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    {a.cwd}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    title="复制工作目录完整路径"
+                                    onClick={() => void copyToClipboard(a.cwd)}
+                                    style={{
+                                      flexShrink: 0,
+                                      padding: "2px 6px",
+                                      fontSize: 10,
+                                      borderRadius: 4,
+                                      border: `1px solid ${OBS_PALETTE.border}`,
+                                      background: "#fff",
+                                      color: "#475569",
+                                      cursor: "pointer",
+                                    }}
+                                  >
+                                    复制
+                                  </button>
+                                </div>
+                              </div>
                             </td>
                             <td
                               style={{
@@ -3804,7 +3899,7 @@ export function App() {
                               )}
                               {profs.length > 1 && (
                                 <label style={{ display: "block", marginBottom: 6, color: OBS_PALETTE.textMuted }}>
-                                  Profile
+                                  启动配置（多选一时）
                                   <select
                                     value={selectedProfileByApp[a.id] ?? profs[0]?.id}
                                     disabled={busy}
@@ -3839,8 +3934,8 @@ export function App() {
                                   aria-label={busy ? "启动中" : "启动会话"}
                                   title={
                                     profs.length === 0
-                                      ? "需先存在绑定到该应用的 Profile"
-                                      : "POST /v1/sessions，等同 yarn oc session create"
+                                      ? "需先有该应用的启动配置（注册应用时会自动创建默认配置）"
+                                      : "POST /v1/sessions，每次新建一条会话；CLI 为 yarn oc session start"
                                   }
                                   onClick={() => void startSessionForApp(a.id)}
                                   style={{
@@ -3866,22 +3961,17 @@ export function App() {
                                 <button
                                   type="button"
                                   disabled={busy || activeForApp.length === 0}
-                                  aria-label={
-                                    activeForApp.length === 0
-                                      ? "关闭会话"
-                                      : `关闭会话（${activeForApp.length} 个）`
-                                  }
+                                  aria-label={activeForApp.length === 0 ? "停止会话" : "停止该应用下活跃会话"}
                                   title={
                                     activeForApp.length === 0
-                                      ? "该应用下无运行中/启动中的会话"
-                                      : `停止 ${activeForApp.length} 个会话（POST .../stop）`
+                                      ? "该应用下无运行中或启动中的会话"
+                                      : "对该应用下各活跃会话依次 POST /v1/sessions/:id/stop"
                                   }
                                   onClick={() => void stopSessionsForApp(a.id)}
                                   style={{
                                     display: "inline-flex",
                                     alignItems: "center",
                                     justifyContent: "center",
-                                    gap: 5,
                                     minWidth: 30,
                                     minHeight: 28,
                                     padding: "4px 8px",
@@ -3897,25 +3987,9 @@ export function App() {
                                       color={activeForApp.length === 0 ? OBS_PALETTE.textMuted : "#b91c1c"}
                                     />
                                   ) : (
-                                    <>
-                                      <IconSessionStop
-                                        color={activeForApp.length === 0 ? OBS_PALETTE.textMuted : "#b91c1c"}
-                                      />
-                                      {activeForApp.length > 0 && (
-                                        <span
-                                          style={{
-                                            fontSize: 10,
-                                            fontWeight: 700,
-                                            lineHeight: 1,
-                                            minWidth: 14,
-                                            textAlign: "center",
-                                          }}
-                                          aria-hidden
-                                        >
-                                          {activeForApp.length}
-                                        </span>
-                                      )}
-                                    </>
+                                    <IconSessionStop
+                                      color={activeForApp.length === 0 ? OBS_PALETTE.textMuted : "#b91c1c"}
+                                    />
                                   )}
                                 </button>
                                 <button
@@ -3943,7 +4017,7 @@ export function App() {
                                 <button
                                   type="button"
                                   disabled={busy || !tokenTrimmed}
-                                  title="DELETE /v1/apps/:id，移除应用及其 Profile 与用户脚本；会先停止相关运行中会话"
+                                  title="DELETE /v1/apps/:id，移除应用及其启动配置与用户脚本；会先停止相关运行中会话"
                                   onClick={() => void removeRegisteredApp(a.id)}
                                   style={{
                                     display: "inline-flex",
@@ -4053,6 +4127,7 @@ export function App() {
                   状态
                 </th>
                 <th
+                  title="创建会话时选用的启动配置 id；与 POST /v1/sessions 中 profileId 一致"
                   style={{
                     textAlign: "left",
                     padding: "12px 14px",
@@ -4063,7 +4138,7 @@ export function App() {
                     background: "#f8fafc",
                   }}
                 >
-                  Profile
+                  启动配置
                 </th>
                 <th
                   title="子进程 remote-debugging 端口；点击复制经 Core 的 CDP 网关（供 Playwright connectOverCDP 等）"
@@ -4196,7 +4271,7 @@ export function App() {
                     <div style={{ marginTop: 8 }}>
                       <button
                         type="button"
-                        title="将该 Profile 所属 app 的用户脚本正文注入当前 CDP 全部 page target（需 allowScriptExecution）"
+                        title="将该会话对应应用下的用户脚本正文注入当前 CDP 全部 page target（需 allowScriptExecution）"
                         disabled={userScriptInjectBusy === s.id}
                         onClick={() => void injectUserScriptsForSession(s.id)}
                         style={{
@@ -4659,8 +4734,8 @@ export function App() {
                 </div>
                 <div style={{ fontSize: 11, color: OBS_PALETTE.textMuted, marginTop: 4, lineHeight: 1.45 }}>
                   成功后将依次 <code style={{ fontSize: 10 }}>POST /v1/apps</code> 与{" "}
-                  <code style={{ fontSize: 10 }}>POST /v1/profiles</code>（默认 Profile id 为{" "}
-                  <code style={{ fontSize: 10 }}>&lt;应用ID&gt;-default</code>，与 <code style={{ fontSize: 10 }}>yarn oc app bootstrap</code>{" "}
+                  <code style={{ fontSize: 10 }}>POST /v1/profiles</code>（默认启动配置 id 为{" "}
+                  <code style={{ fontSize: 10 }}>&lt;应用ID&gt;-default</code>，与 <code style={{ fontSize: 10 }}>yarn oc app create</code>{" "}
                   一致）。调用名即「应用 ID」，与 <code style={{ fontSize: 10 }}>yarn oc &lt;appId&gt; …</code> 一致且全局唯一。
                 </div>
               </div>

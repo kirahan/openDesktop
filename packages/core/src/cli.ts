@@ -7,11 +7,6 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { runAppFirst } from "./cli/appFirstRun.js";
 import { runDoctor } from "./cli/doctorRun.js";
-import {
-  appIdExists,
-  formatAppIdConflictMessage,
-  parseAppIdsFromListJson,
-} from "./cli/appRegistrationHelpers.js";
 import { exitCodeForHttpStatus } from "./cli/mapHttpToExit.js";
 import { runAppBootstrapFlow } from "./cli/runAppBootstrapFlow.js";
 import { printSessionList } from "./cli/output.js";
@@ -234,65 +229,13 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
 
       console.log("");
       console.log("下一步：创建会话");
-      console.log("  od session create demo");
+      console.log("  od session start demo");
     });
 
   appCmd
     .command("create")
-    .description("注册自定义应用（需 Core 已启动）")
-    .requiredOption("--id <id>", "应用 ID")
-    .requiredOption("--exe <path>", "可执行文件路径（如 Electron 或 node）")
-    .option("--cwd <path>", "工作目录", process.cwd())
-    .option(
-      "--args <json>",
-      '启动参数 JSON 数组，例如 ["--foo","bar"]',
-      "[]",
-    )
-    .option(
-      "--skip-debug-inject",
-      "不向子进程附加 --remote-debugging-port（默认会附加，供 Electron 调试用）",
-    )
-    .action(async (opts) => {
-      let args: string[];
-      try {
-        args = JSON.parse(opts.args) as string[];
-        if (!Array.isArray(args)) throw new Error("args 必须是 JSON 数组");
-      } catch (e) {
-        console.error("--args 须为合法 JSON 数组:", e);
-        process.exit(1);
-        return;
-      }
-      const listRes = await apiFetch(program, "GET", "/v1/apps");
-      const listRaw = await listRes.text();
-      if (!listRes.ok) {
-        console.error(`无法拉取应用列表: HTTP ${listRes.status} ${listRaw.slice(0, 200)}`);
-        process.exit(exitCodeForHttpStatus(listRes.status));
-        return;
-      }
-      if (appIdExists(parseAppIdsFromListJson(listRaw), opts.id)) {
-        console.error(formatAppIdConflictMessage(opts.id));
-        process.exit(2);
-        return;
-      }
-      const o = opts as { skipDebugInject?: boolean };
-      const res = await apiFetch(program, "POST", "/v1/apps", {
-        id: opts.id,
-        name: opts.id,
-        executable: opts.exe,
-        cwd: opts.cwd,
-        args,
-        env: {},
-        injectElectronDebugPort: !o.skipDebugInject,
-      });
-      const text = await res.text();
-      console.log(text);
-      if (!res.ok) process.exit(exitCodeForHttpStatus(res.status));
-    });
-
-  appCmd
-    .command("bootstrap")
     .description(
-      "注册应用并创建默认 Profile（profileId 默认为 <id>-default），可选立即创建会话；应用 id 即 yarn oc <appId> 中的调用名",
+      "注册应用并创建默认启动配置（默认 id 为 &lt;应用 id&gt;-default），可选立即创建会话；需 Core 已启动；应用 id 即 yarn oc &lt;appId&gt; 调用名",
     )
     .requiredOption("--id <id>", "应用 ID（调用名，与 yarn oc <appId> 子命令一致）")
     .requiredOption("--exe <path>", "可执行文件路径（如 Electron 或 node）")
@@ -308,9 +251,9 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
     )
     .option(
       "--profile-id <id>",
-      "默认 Profile 的 id（省略则为 <应用 id>-default）",
+      "默认启动配置的 id（省略则为 <应用 id>-default）",
     )
-    .option("--start", "创建默认 Profile 后立即创建会话（默认否）", false)
+    .option("--start", "创建默认启动配置后立即创建会话（默认否）", false)
     .action(async (opts) => {
       let args: string[];
       try {
@@ -368,7 +311,9 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
       if (!res.ok) process.exit(exitCodeForHttpStatus(res.status));
     });
 
-  const sessionCmd = program.command("session").description("Manage sessions");
+  const sessionCmd = program
+    .command("session")
+    .description("Manage sessions：start 为某启动配置新建会话（每次新 session id），stop 停止，list 列表");
 
   sessionCmd
     .command("list")
@@ -394,7 +339,10 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
     });
 
   sessionCmd
-    .command("create <profileId>")
+    .command("start <profileId>")
+    .description(
+      "为指定启动配置新建一条调试会话（每次调用均 POST /v1/sessions，得到新的 session id；与 session stop 相对）",
+    )
     .action(async (profileId: string) => {
       const res = await apiFetch(program, "POST", "/v1/sessions", { profileId });
       const text = await res.text();

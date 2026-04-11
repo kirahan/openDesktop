@@ -51,9 +51,9 @@ export OPENDESKTOP_TOKEN_FILE="$HOME/Library/Application Support/OpenDesktop/tok
 yarn app:demo
 ```
 
-会注册内置 **mock CDP** 应用 `demo-mock` 和 Profile `demo`。
+会注册内置 **mock CDP** 应用 `demo-mock` 和对应启动配置（示例 id 为 `demo`）。
 
-**一条命令**完成「应用 + Profile + 会话」：
+**一条命令**完成「应用 + 默认启动配置 + 会话」：
 
 ```bash
 yarn demo
@@ -67,21 +67,16 @@ yarn demo
 
 ```bash
 yarn oc app list
-yarn oc profile list
+yarn oc profile list   # 启动配置列表，对应 GET /v1/profiles
 yarn oc session list
+yarn oc session start <profileId>   # 新建调试会话；每次调用均 POST /v1/sessions，得到新 session id
 ```
 
-**推荐：一条命令注册应用、默认 Profile，并可选用 `--start` 立即建会话**（`app.id` 即下方「调用名」，与 App-first 下 `yarn oc <appId> <子命令>` 一致；同一 exe 多套配置请**多次注册**，各用不同 id）：
+**推荐：`app create` 一条命令**注册应用、默认启动配置，并可选用 `--start` 立即建会话（`app.id` 即「调用名」，与 App-first 下 `yarn oc <appId> <子命令>` 一致；同一 exe 多套配置请**多次注册**，各用不同 id）：
 
 ```bash
-yarn oc app bootstrap --id my-app --exe "$(which node)" --cwd "$PWD" --args '[]' --skip-debug-inject
+yarn oc app create --id my-app --exe "$(which node)" --cwd "$PWD" --args '[]' --skip-debug-inject
 # 需要立刻有会话时再加：--start
-```
-
-自定义应用（仅注册应用、不建默认 Profile 时可用）：
-
-```bash
-yarn oc app create --id my-app --exe "$(which node)" --cwd "$PWD" --args '["-e","console.log(1)"]' --skip-debug-inject
 ```
 
 ## CLI 示例

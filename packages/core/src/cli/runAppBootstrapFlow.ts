@@ -27,7 +27,7 @@ export interface BootstrapFlowInput {
 
 /**
  * 顺序执行：校验 id 未占用 → POST /v1/apps → POST /v1/profiles → 可选 POST /v1/sessions。
- * 供 CLI `app bootstrap` 与单测注入 `apiFetch`。
+ * 供 CLI `app create` 与单测注入 `apiFetch`。
  */
 export async function runAppBootstrapFlow(
   apiFetch: ApiFetchFn,
@@ -115,7 +115,7 @@ export async function runAppBootstrapFlow(
     messages.push("已创建会话");
     console.log(sessionResponseText);
   } else {
-    messages.push(`下一步：yarn oc session create ${input.profileId}`);
+    messages.push(`下一步：yarn oc session start ${input.profileId}`);
   }
 
   return { ok: true, messages, sessionResponseText };

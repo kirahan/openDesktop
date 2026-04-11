@@ -251,7 +251,7 @@ export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
 
   const [appId, cmd, ...rest] = pos;
   if (!appId || !cmd) return { kind: "not-app-first" };
-  /** 必须先判断：session create <profileId> 等整段交给 Commander，避免误当成 App-first 且被「多余参数」拦截 */
+  /** 必须先判断：session start <profileId> 等整段交给 Commander，避免误当成 App-first 且被「多余参数」拦截 */
   if (RESERVED_TOP_LEVEL.has(appId)) return { kind: "not-app-first" };
   if (rest.length > 0) {
     return { kind: "error", message: `多余参数: ${rest.join(" ")}`, exitCode: EX_USAGE };

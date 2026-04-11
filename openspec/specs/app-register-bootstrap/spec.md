@@ -2,7 +2,10 @@
 
 ## Purpose
 
-约定应用注册时的调用名、唯一性校验、短 id 生成，以及 CLI 一条命令完成应用加默认 Profile 与可选会话的快乐路径；Web 与 CLI 行为对齐，便于 App-first 使用。
+约定应用注册时的调用名、唯一性校验、短 id 生成，以及 **`yarn oc app create`** 一条命令完成应用加默认 Profile 与可选会话的快乐路径；Web 与 CLI 行为对齐，便于 App-first 使用。
+
+用户可见术语（主路径强调「应用」与「会话」、弱化 Profile）见 `openspec/specs/ux-app-session-terminology/spec.md`。
+
 ## Requirements
 ### Requirement: 调用名即 App id 且与 App-first 一致
 
@@ -38,7 +41,7 @@
 
 ### Requirement: 快乐路径一次注册默认 Profile 与可选会话
 
-项目 SHALL 提供一条 CLI 命令（或等价 `app create` 扩展标志），在单次用户 invocation 中顺序完成：创建应用、创建**默认** Profile（绑定该 `appId`）、以及可选地创建会话。默认 Profile 的 `id` 命名规则 SHALL 在文档中固定（例如 `{appId}-default`）。若某步返回 409（资源已存在），行为 SHALL 在文档中定义为「跳过并继续」或「失败退出」之一，且须一致实现。
+项目 SHALL 通过 **`yarn oc app create`**（或文档化等价入口）在单次用户 invocation 中顺序完成：创建应用、创建**默认** Profile（绑定该 `appId`）、以及可选地创建会话。默认 Profile 的 `id` 命名规则 SHALL 在文档中固定（例如 `{appId}-default`）。若某步返回 409（资源已存在），行为 SHALL 在文档中定义为「跳过并继续」或「失败退出」之一，且须一致实现。
 
 #### Scenario: 完整链路成功
 
