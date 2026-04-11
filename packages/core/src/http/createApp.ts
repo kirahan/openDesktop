@@ -34,6 +34,8 @@ import {
 import { parseUserScriptSource } from "../userScripts/parseUserScriptMetadata.js";
 import { collectScriptBodiesForApp } from "../userScripts/collectScriptBodiesForApp.js";
 import type { UserScriptRecord } from "../userScripts/types.js";
+import { pickWindowsExecutablePath } from "../dialog/pickWindowsExecutablePath.js";
+import { resolveWindowsShortcutFromPath } from "../shortcut/resolveWindowsShortcut.js";
 
 export interface AppDeps {
   config: CoreConfig;
@@ -136,6 +138,43 @@ export function createApp(deps: AppDeps): CreateAppResult {
 
   v1.use(authMiddleware(token));
 
+  v1.post("/resolve-windows-shortcut", async (req, res) => {
+    const body = req.body as { path?: string };
+    if (typeof body.path !== "string" || !body.path.trim()) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "path required");
+    }
+    const result = await resolveWindowsShortcutFromPath(body.path.trim());
+    if ("error" in result) {
+      const status =
+        result.error === "NOT_FOUND"
+          ? 404
+          : result.error === "PLATFORM_UNSUPPORTED" ||
+              result.error === "NOT_LNK" ||
+              result.error === "PATH_NOT_ABSOLUTE"
+            ? 400
+            : 422;
+      return jsonError(res, status, result.error, result.message);
+    }
+    res.json(result);
+  });
+
+  v1.post("/pick-executable-path", async (_req, res) => {
+    const result = await pickWindowsExecutablePath();
+    if ("error" in result) {
+      const status = result.error === "PLATFORM_UNSUPPORTED" ? 400 : 422;
+      return jsonError(res, status, result.error, result.message);
+    }
+    if ("cancelled" in result && result.cancelled) {
+      res.json({ cancelled: true });
+      return;
+    }
+    if ("path" in result) {
+      res.json({ path: result.path });
+      return;
+    }
+    return jsonError(res, 500, "UNEXPECTED", "unexpected pick result");
+  });
+
   v1.get("/apps", async (_req, res) => {
     const data = await store.readApps();
     res.json({ apps: data.apps });
@@ -187,6 +226,24 @@ export function createApp(deps: AppDeps): CreateAppResult {
     data.apps[idx] = next;
     await store.writeApps(data.apps);
     res.json({ app: next });
+  });
+
+  v1.delete("/apps/:appId", async (req, res) => {
+    const { appId } = req.params;
+    const appsData = await store.readApps();
+    if (!appsData.apps.some((a) => a.id === appId)) {
+      return jsonError(res, 404, "APP_NOT_FOUND", "appId does not exist");
+    }
+    const profData = await store.readProfiles();
+    const profileIds = new Set(
+      profData.profiles.filter((p) => p.appId === appId).map((p) => p.id),
+    );
+    await manager.evictSessionsByProfileIds(profileIds);
+    await store.writeProfiles(profData.profiles.filter((p) => p.appId !== appId));
+    const us = await store.readUserScripts();
+    await store.writeUserScripts(us.scripts.filter((x) => x.appId !== appId));
+    await store.writeApps(appsData.apps.filter((a) => a.id !== appId));
+    res.status(204).send();
   });
 
   async function appExists(appId: string): Promise<boolean> {

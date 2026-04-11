@@ -3,6 +3,11 @@ import { NetworkView } from "./network/NetworkView.js";
 import { proxyRequestCompleteToRow, requestCompleteToRow } from "./network/sseToRow.js";
 import type { NetworkRequestRow } from "./network/types.js";
 import { domPickStateKey } from "./domPickUi.js";
+import {
+  appIdExists,
+  parseAppIdsFromListJson,
+  suggestedAppIdFromExecutablePath,
+} from "./appIdSuggest.js";
 
 type DetailKind = "list-window" | "metrics" | "snapshot";
 
@@ -77,6 +82,21 @@ const DEFAULT_USER_SCRIPT = `// ==UserScript==
 // ==/UserScript==
 
 `;
+
+/** 与 Core `path.win32.isAbsolute` 对齐的轻量检测（注册 .lnk 时提示用） */
+function looksLikeWindowsAbsolutePath(p: string): boolean {
+  let t = p.trim();
+  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+    t = t.slice(1, -1).trim();
+  }
+  if (!t) return false;
+  if (t.startsWith("\\\\")) return true;
+  return /^[a-zA-Z]:[\\/]/.test(t);
+}
+
+/** 快捷方式解析失败时附加的操作提示（复制完整路径） */
+const LNK_RESOLVE_FAIL_HINT =
+  "请确认路径含盘符且文件存在。仍失败时：在资源管理器中 Shift+右键快捷方式 →「复制为路径」，粘贴到上方（可去掉首尾引号）后再试。";
 
 /**
  * 解析 API 基址。未填写时：仅当页面明显与 Core 同源（:8787）才用相对路径 `/v1`；
@@ -2447,6 +2467,18 @@ export function App() {
   const [selectedProfileByApp, setSelectedProfileByApp] = useState<Record<string, string>>({});
   const [appBusyId, setAppBusyId] = useState<string | null>(null);
   const [appActionMsg, setAppActionMsg] = useState<Record<string, string>>({});
+  /** 注册应用弹层（POST /v1/apps） */
+  const [registerAppOpen, setRegisterAppOpen] = useState(false);
+  const [registerAppBusy, setRegisterAppBusy] = useState(false);
+  const [registerAppErr, setRegisterAppErr] = useState<string | null>(null);
+  const [registerAppPathHint, setRegisterAppPathHint] = useState<string | null>(null);
+  const [regId, setRegId] = useState("");
+  const [regName, setRegName] = useState("");
+  const [regExe, setRegExe] = useState("");
+  const [regCwd, setRegCwd] = useState("");
+  const [regArgsJson, setRegArgsJson] = useState("[]");
+  const [regInjectCdp, setRegInjectCdp] = useState(true);
+  const [regDedicatedProxy, setRegDedicatedProxy] = useState(false);
   /** 已注册应用 — 用户脚本弹层 */
   const [userScriptAppId, setUserScriptAppId] = useState<string | null>(null);
   const [userScriptList, setUserScriptList] = useState<OdUserScript[]>([]);
@@ -2604,6 +2636,248 @@ export function App() {
     return apiRoot ? `${apiRoot}${path}` : path;
   }
 
+  function closeRegisterAppModal() {
+    setRegisterAppOpen(false);
+    setRegisterAppErr(null);
+    setRegisterAppPathHint(null);
+  }
+
+  function openRegisterAppModal() {
+    setRegisterAppErr(null);
+    setRegisterAppPathHint(null);
+    setRegId("");
+    setRegName("");
+    setRegExe("");
+    setRegCwd("");
+    setRegArgsJson("[]");
+    setRegInjectCdp(true);
+    setRegDedicatedProxy(false);
+    setRegisterAppOpen(true);
+  }
+
+  const regenerateAppIdFromExe = useCallback(() => {
+    const p = regExe.trim();
+    if (!p) {
+      setRegisterAppErr("请先填写或选择可执行文件路径");
+      return;
+    }
+    setRegisterAppErr(null);
+    setRegId(suggestedAppIdFromExecutablePath(p));
+  }, [regExe]);
+
+  async function resolveRegisterShortcutForPath(
+    lnkPath: string,
+    options?: { manageBusy?: boolean },
+  ) {
+    const manageBusy = options?.manageBusy !== false;
+    const p = lnkPath.trim();
+    if (!p.toLowerCase().endsWith(".lnk")) return;
+    if (!tokenTrimmed) {
+      setRegisterAppErr("请先填写 Bearer token");
+      setRegisterAppPathHint(LNK_RESOLVE_FAIL_HINT);
+      return;
+    }
+    if (manageBusy) setRegisterAppBusy(true);
+    setRegisterAppErr(null);
+    setRegisterAppPathHint(null);
+    try {
+      const res = await fetch(apiUrl("/v1/resolve-windows-shortcut"), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ path: p }),
+      });
+      const raw = await res.text();
+      let parsed: {
+        targetPath?: string;
+        arguments?: string;
+        workingDirectory?: string;
+        error?: { code?: string; message?: string };
+      };
+      try {
+        parsed = JSON.parse(raw) as typeof parsed;
+      } catch {
+        throw new Error(raw.slice(0, 200));
+      }
+      if (!res.ok) {
+        const msg = parsed.error?.message ?? `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+      const tp = parsed.targetPath?.trim();
+      if (!tp) throw new Error("响应缺少 targetPath");
+      setRegExe(tp);
+      setRegId(suggestedAppIdFromExecutablePath(tp));
+      setRegCwd((c) => (c.trim() ? c : (parsed.workingDirectory?.trim() ?? "")));
+      if (parsed.arguments?.trim()) {
+        setRegisterAppPathHint(
+          `快捷方式含命令行参数（请按需自行填入「启动参数」JSON）：${parsed.arguments.trim()}`,
+        );
+      } else {
+        setRegisterAppPathHint(null);
+      }
+    } catch (e) {
+      setRegisterAppErr(e instanceof Error ? e.message : String(e));
+      setRegisterAppPathHint(LNK_RESOLVE_FAIL_HINT);
+    } finally {
+      if (manageBusy) setRegisterAppBusy(false);
+    }
+  }
+
+  async function pickExecutableViaSystemDialog() {
+    if (!tokenTrimmed) {
+      setRegisterAppErr("请先填写 Bearer token");
+      return;
+    }
+    setRegisterAppBusy(true);
+    setRegisterAppErr(null);
+    setRegisterAppPathHint(null);
+    try {
+      const res = await fetch(apiUrl("/v1/pick-executable-path"), {
+        method: "POST",
+        headers,
+      });
+      const raw = await res.text();
+      let parsed: {
+        path?: string;
+        cancelled?: boolean;
+        error?: { code?: string; message?: string };
+      };
+      try {
+        parsed = JSON.parse(raw) as typeof parsed;
+      } catch {
+        throw new Error(raw.slice(0, 200));
+      }
+      if (!res.ok) {
+        const msg = parsed.error?.message ?? `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+      if (parsed.cancelled === true) {
+        return;
+      }
+      const p = parsed.path?.trim();
+      if (!p) throw new Error("响应缺少 path");
+      setRegExe(p);
+      setRegId(suggestedAppIdFromExecutablePath(p));
+      if (p.toLowerCase().endsWith(".lnk")) {
+        await resolveRegisterShortcutForPath(p, { manageBusy: false });
+      }
+    } catch (e) {
+      setRegisterAppErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRegisterAppBusy(false);
+    }
+  }
+
+  async function submitRegisterApp() {
+    if (!tokenTrimmed) {
+      setRegisterAppErr("请先填写 Bearer token");
+      return;
+    }
+    const id = regId.trim();
+    const exe = regExe.trim();
+    if (!id || !exe) {
+      setRegisterAppErr("应用 ID 与可执行文件路径为必填");
+      return;
+    }
+    let args: string[];
+    try {
+      const parsed = JSON.parse(regArgsJson) as unknown;
+      if (!Array.isArray(parsed) || !parsed.every((x) => typeof x === "string")) {
+        throw new Error("须为 JSON 字符串数组，例如 [] 或 [\"--flag\",\"value\"]");
+      }
+      args = parsed;
+    } catch (e) {
+      setRegisterAppErr(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    setRegisterAppBusy(true);
+    setRegisterAppErr(null);
+    try {
+      const listRes = await fetch(appsUrl, { method: "GET", headers });
+      const listRaw = await listRes.text();
+      if (!listRes.ok) {
+        throw new Error(
+          `无法校验调用名是否唯一：GET /v1/apps ${listRes.status} ${listRaw.slice(0, 160)}`,
+        );
+      }
+      if (!listRaw.trimStart().startsWith("{")) {
+        throw new Error("无法校验调用名：应用列表返回非 JSON");
+      }
+      const existing = parseAppIdsFromListJson(listRaw);
+      if (appIdExists(existing, id)) {
+        throw new Error(
+          `应用 id「${id}」已注册。请换一个调用名（须与 yarn oc <appId> 子命令中的名称一致且全局唯一）。`,
+        );
+      }
+
+      const body: Record<string, unknown> = {
+        id,
+        name: regName.trim() || id,
+        executable: exe,
+        args,
+        env: {},
+        injectElectronDebugPort: regInjectCdp,
+        useDedicatedProxy: regDedicatedProxy,
+      };
+      if (regCwd.trim()) body.cwd = regCwd.trim();
+      const res = await fetch(appsUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+      const raw = await res.text();
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = JSON.parse(raw) as { error?: { message?: string; code?: string } };
+          if (j.error?.message) {
+            msg = j.error.code ? `${j.error.code}: ${j.error.message}` : j.error.message;
+          }
+        } catch {
+          msg = raw.slice(0, 200);
+        }
+        throw new Error(msg);
+      }
+
+      const defaultProfileId = `${id}-default`;
+      const profRes = await fetch(profilesUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          id: defaultProfileId,
+          appId: id,
+          name: regName.trim() || defaultProfileId,
+          env: {},
+          extraArgs: [],
+        }),
+      });
+      const profRaw = await profRes.text();
+      if (profRes.status !== 409 && !profRes.ok) {
+        let pmsg = `HTTP ${profRes.status}`;
+        try {
+          const j = JSON.parse(profRaw) as { error?: { message?: string; code?: string } };
+          if (j.error?.message) {
+            pmsg = j.error.code ? `${j.error.code}: ${j.error.message}` : j.error.message;
+          }
+        } catch {
+          pmsg = profRaw.slice(0, 200);
+        }
+        setErr(
+          `应用「${id}」已注册，但默认 Profile「${defaultProfileId}」创建失败：${pmsg}。请在本机用 POST /v1/profiles 补建，或删除应用后改用 yarn oc app bootstrap。`,
+        );
+        void refreshCoreData();
+        closeRegisterAppModal();
+        return;
+      }
+
+      void refreshCoreData();
+      closeRegisterAppModal();
+    } catch (e) {
+      setRegisterAppErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRegisterAppBusy(false);
+    }
+  }
+
   async function patchAppUseDedicatedProxy(appId: string, useDedicatedProxy: boolean) {
     if (!tokenTrimmed) return;
     setAppBusyId(appId);
@@ -2622,6 +2896,47 @@ export function App() {
           msg = j.error?.message ?? msg;
         } catch {
           msg = raw.slice(0, 160);
+        }
+        throw new Error(msg);
+      }
+      void refreshCoreData();
+    } catch (e) {
+      setAppActionMsg((m) => ({
+        ...m,
+        [appId]: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setAppBusyId(null);
+    }
+  }
+
+  async function removeRegisteredApp(appId: string) {
+    if (!tokenTrimmed) {
+      setAppActionMsg((m) => ({ ...m, [appId]: "请先填写 Bearer token" }));
+      return;
+    }
+    if (
+      !window.confirm(
+        `确定删除应用「${appId}」？将停止相关运行中会话，并删除绑定 Profile 与用户脚本记录（不可恢复）。`,
+      )
+    ) {
+      return;
+    }
+    setAppBusyId(appId);
+    setAppActionMsg((m) => ({ ...m, [appId]: "" }));
+    try {
+      const res = await fetch(apiUrl(`/v1/apps/${encodeURIComponent(appId)}`), {
+        method: "DELETE",
+        headers,
+      });
+      if (!res.ok) {
+        const raw = await res.text();
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = JSON.parse(raw) as { error?: { message?: string } };
+          msg = j.error?.message ?? msg;
+        } catch {
+          msg = raw.slice(0, 200);
         }
         throw new Error(msg);
       }
@@ -2872,7 +3187,7 @@ export function App() {
     if (profs.length === 0) {
       setAppActionMsg((m) => ({
         ...m,
-        [appId]: "无可用 Profile：请先创建 Profile（如 yarn oc app init-demo）",
+        [appId]: `无可用 Profile：若仅用旧版 Web 注册过应用，请补建 Profile（POST /v1/profiles，例如 id 为 ${appId}-default）；或使用 yarn oc app bootstrap 重新注册。`,
       }));
       return;
     }
@@ -3211,6 +3526,7 @@ export function App() {
           <div
             style={{
               display: "flex",
+              flexWrap: "wrap",
               alignItems: "center",
               gap: 8,
               padding: "12px 16px",
@@ -3227,10 +3543,38 @@ export function App() {
               }}
             />
             <span style={{ fontWeight: 600, fontSize: 14, color: "#0f172a" }}>已注册应用</span>
-            <span style={{ fontSize: 12, color: OBS_PALETTE.textMuted, fontWeight: 400 }}>
+            <span
+              style={{
+                fontSize: 12,
+                color: OBS_PALETTE.textMuted,
+                fontWeight: 400,
+                flex: "1 1 200px",
+                minWidth: 0,
+              }}
+            >
               （与 <code style={{ fontSize: 11 }}>yarn oc app list</code> 同源；启动会话等价{" "}
               <code style={{ fontSize: 11 }}>yarn oc session create &lt;profileId&gt;</code>）
             </span>
+            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", flexShrink: 0 }}>
+              <button
+                type="button"
+                disabled={!tokenTrimmed}
+                title={!tokenTrimmed ? "请先填写 Bearer token" : "POST /v1/apps，与 yarn oc app create 等价"}
+                onClick={() => openRegisterAppModal()}
+                style={{
+                  padding: "6px 12px",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  borderRadius: 8,
+                  border: `1px solid ${OBS_PALETTE.borderActive}`,
+                  background: !tokenTrimmed ? "#f1f5f9" : "#eff6ff",
+                  color: !tokenTrimmed ? OBS_PALETTE.textMuted : "#1d4ed8",
+                  cursor: !tokenTrimmed ? "not-allowed" : "pointer",
+                }}
+              >
+                注册应用
+              </button>
+            </div>
           </div>
           <div style={{ background: "#fafbfc" }}>
             {!tokenTrimmed && (
@@ -3313,7 +3657,7 @@ export function App() {
                             borderBottom: `1px solid #f1f5f9`,
                           }}
                         >
-                          暂无已注册应用。可使用 CLI 注册，例如{" "}
+                          暂无已注册应用。可点击上方「注册应用」，或使用 CLI，例如{" "}
                           <code style={{ fontSize: 12 }}>yarn oc app init-demo</code>。
                         </td>
                       </tr>
@@ -3595,6 +3939,28 @@ export function App() {
                                   }}
                                 >
                                   脚本
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy || !tokenTrimmed}
+                                  title="DELETE /v1/apps/:id，移除应用及其 Profile 与用户脚本；会先停止相关运行中会话"
+                                  onClick={() => void removeRegisteredApp(a.id)}
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    minHeight: 28,
+                                    padding: "4px 10px",
+                                    fontSize: 11,
+                                    fontWeight: 600,
+                                    cursor: busy || !tokenTrimmed ? "not-allowed" : "pointer",
+                                    borderRadius: 6,
+                                    border: `1px solid #fecaca`,
+                                    background: busy || !tokenTrimmed ? "#f1f5f9" : "#fef2f2",
+                                    color: busy || !tokenTrimmed ? OBS_PALETTE.textMuted : "#b91c1c",
+                                  }}
+                                >
+                                  移除
                                 </button>
                               </div>
                             </td>
@@ -4236,6 +4602,325 @@ export function App() {
                     删除
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {registerAppOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="od-register-app-title"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            background: "rgba(15,23,42,0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            boxSizing: "border-box",
+          }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) closeRegisterAppModal();
+          }}
+        >
+          <div
+            style={{
+              width: "min(480px, 100%)",
+              maxHeight: "min(92vh, 720px)",
+              background: "#fff",
+              borderRadius: 12,
+              border: `1px solid ${OBS_PALETTE.border}`,
+              boxShadow: "0 20px 50px rgba(15,23,42,0.18)",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                justifyContent: "space-between",
+                gap: 12,
+                padding: "12px 16px",
+                borderBottom: `1px solid ${OBS_PALETTE.border}`,
+                background: "#f8fafc",
+                flexShrink: 0,
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div id="od-register-app-title" style={{ fontWeight: 700, fontSize: 15, color: "#0f172a" }}>
+                  注册应用
+                </div>
+                <div style={{ fontSize: 11, color: OBS_PALETTE.textMuted, marginTop: 4, lineHeight: 1.45 }}>
+                  成功后将依次 <code style={{ fontSize: 10 }}>POST /v1/apps</code> 与{" "}
+                  <code style={{ fontSize: 10 }}>POST /v1/profiles</code>（默认 Profile id 为{" "}
+                  <code style={{ fontSize: 10 }}>&lt;应用ID&gt;-default</code>，与 <code style={{ fontSize: 10 }}>yarn oc app bootstrap</code>{" "}
+                  一致）。调用名即「应用 ID」，与 <code style={{ fontSize: 10 }}>yarn oc &lt;appId&gt; …</code> 一致且全局唯一。
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={registerAppBusy}
+                onClick={() => closeRegisterAppModal()}
+                style={{
+                  padding: "6px 12px",
+                  fontSize: 13,
+                  borderRadius: 8,
+                  border: `1px solid ${OBS_PALETTE.border}`,
+                  background: "#fff",
+                  cursor: registerAppBusy ? "not-allowed" : "pointer",
+                }}
+              >
+                关闭
+              </button>
+            </div>
+            <div style={{ padding: 16, overflow: "auto", display: "flex", flexDirection: "column", gap: 12 }}>
+              {registerAppErr && (
+                <div
+                  style={{
+                    padding: 10,
+                    borderRadius: 8,
+                    background: "#fef2f2",
+                    border: "1px solid #fecaca",
+                    color: "#991b1b",
+                    fontSize: 12,
+                    lineHeight: 1.45,
+                  }}
+                >
+                  {registerAppErr}
+                </div>
+              )}
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: "#334155" }}>
+                可执行文件路径（必填）
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "stretch" }}>
+                  <input
+                    className="od-input"
+                    value={regExe}
+                    onChange={(e) => {
+                      setRegExe(e.target.value);
+                      setRegisterAppPathHint(null);
+                    }}
+                    onBlur={(e) => {
+                      const t = e.target.value.trim();
+                      if (!t) return;
+                      if (t.toLowerCase().endsWith(".lnk")) {
+                        if (looksLikeWindowsAbsolutePath(t) && tokenTrimmed) {
+                          void resolveRegisterShortcutForPath(t, { manageBusy: true });
+                        }
+                        return;
+                      }
+                      setRegId((cur) =>
+                        cur.trim() === "" ? suggestedAppIdFromExecutablePath(t) : cur,
+                      );
+                    }}
+                    placeholder="可粘贴完整路径，或点「系统对话框…」选择（.lnk 会自动解析）"
+                    autoComplete="off"
+                    style={{
+                      flex: "1 1 200px",
+                      minWidth: 0,
+                      boxSizing: "border-box",
+                      fontSize: 13,
+                    }}
+                  />
+                  <button
+                    type="button"
+                    disabled={registerAppBusy || !tokenTrimmed}
+                    title="由本机 Core 弹出 Windows 系统文件对话框以获取完整路径（请求会阻塞至选完或取消）；选 .lnk 后会自动解析"
+                    onClick={() => void pickExecutableViaSystemDialog()}
+                    style={{
+                      flexShrink: 0,
+                      padding: "0 12px",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      borderRadius: 8,
+                      border: `1px solid #059669`,
+                      background:
+                        registerAppBusy || !tokenTrimmed ? "#f1f5f9" : "#ecfdf5",
+                      color: registerAppBusy || !tokenTrimmed ? OBS_PALETTE.textMuted : "#047857",
+                      cursor: registerAppBusy || !tokenTrimmed ? "not-allowed" : "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    系统对话框…
+                  </button>
+                </div>
+                {registerAppPathHint && (
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "#b45309",
+                      lineHeight: 1.45,
+                      marginTop: 2,
+                    }}
+                  >
+                    {registerAppPathHint}
+                  </div>
+                )}
+                {regExe.trim().toLowerCase().endsWith(".lnk") &&
+                  !looksLikeWindowsAbsolutePath(regExe) && (
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#b45309",
+                        lineHeight: 1.45,
+                        marginTop: 4,
+                      }}
+                    >
+                      当前为文件名或相对路径，本机 Core 无法定位磁盘上的 .lnk。请 Shift+右键快捷方式选择「复制为路径」，将带盘符的完整路径粘贴到上方后再解析。
+                    </div>
+                  )}
+              </label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12, color: "#334155" }}>调用名 / 应用 ID（必填）</span>
+                  <button
+                    type="button"
+                    disabled={registerAppBusy || !regExe.trim()}
+                    title="按当前路径重新生成：短 slug + 至多 6 位字母数字后缀"
+                    onClick={() => regenerateAppIdFromExe()}
+                    style={{
+                      padding: "4px 8px",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      borderRadius: 6,
+                      border: `1px solid ${OBS_PALETTE.border}`,
+                      background: registerAppBusy || !regExe.trim() ? "#f1f5f9" : "#fff",
+                      color: registerAppBusy || !regExe.trim() ? OBS_PALETTE.textMuted : "#475569",
+                      cursor: registerAppBusy || !regExe.trim() ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    按路径重新生成
+                  </button>
+                </div>
+                <input
+                  className="od-input"
+                  value={regId}
+                  onChange={(e) => setRegId(e.target.value)}
+                  placeholder="选择文件后自动生成，也可手改"
+                  autoComplete="off"
+                  style={{ width: "100%", boxSizing: "border-box", fontSize: 13 }}
+                />
+                <div style={{ fontSize: 11, color: OBS_PALETTE.textMuted, lineHeight: 1.4 }}>
+                  规则：文件名（去扩展名）转成小写与连字符，再附加至多 6 位随机字母数字。提交前会请求{" "}
+                  <code style={{ fontSize: 10 }}>GET /v1/apps</code> 校验是否已被占用。
+                </div>
+              </div>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: "#334155" }}>
+                显示名称（可选，默认同 ID）
+                <input
+                  className="od-input"
+                  value={regName}
+                  onChange={(e) => setRegName(e.target.value)}
+                  placeholder="留空则使用应用 ID"
+                  autoComplete="off"
+                  style={{ width: "100%", boxSizing: "border-box", fontSize: 13 }}
+                />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: "#334155" }}>
+                工作目录（可选）
+                <input
+                  className="od-input"
+                  value={regCwd}
+                  onChange={(e) => setRegCwd(e.target.value)}
+                  placeholder="留空则使用 Core 服务端当前工作目录"
+                  autoComplete="off"
+                  style={{ width: "100%", boxSizing: "border-box", fontSize: 13 }}
+                />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, color: "#334155" }}>
+                启动参数（JSON 字符串数组）
+                <textarea
+                  className="od-input"
+                  value={regArgsJson}
+                  onChange={(e) => setRegArgsJson(e.target.value)}
+                  rows={3}
+                  placeholder='例如 [] 或 ["./main.js"]'
+                  style={{
+                    width: "100%",
+                    boxSizing: "border-box",
+                    fontSize: 12,
+                    fontFamily: "ui-monospace, monospace",
+                    resize: "vertical",
+                  }}
+                />
+              </label>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 12,
+                  color: "#475569",
+                  cursor: registerAppBusy ? "not-allowed" : "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={regInjectCdp}
+                  disabled={registerAppBusy}
+                  onChange={(e) => setRegInjectCdp(e.target.checked)}
+                />
+                注入远程调试端口（与 CLI 默认一致，Electron 调试用）
+              </label>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 12,
+                  color: "#475569",
+                  cursor: registerAppBusy ? "not-allowed" : "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={regDedicatedProxy}
+                  disabled={registerAppBusy}
+                  onChange={(e) => setRegDedicatedProxy(e.target.checked)}
+                />
+                专用本地转发代理（下次启动会话时注入 HTTP(S)_PROXY）
+              </label>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+                <button
+                  type="button"
+                  disabled={registerAppBusy}
+                  onClick={() => closeRegisterAppModal()}
+                  style={{
+                    padding: "8px 14px",
+                    fontSize: 13,
+                    borderRadius: 8,
+                    border: `1px solid ${OBS_PALETTE.border}`,
+                    background: "#fff",
+                    cursor: registerAppBusy ? "not-allowed" : "pointer",
+                  }}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={registerAppBusy || !regId.trim() || !regExe.trim()}
+                  onClick={() => void submitRegisterApp()}
+                  style={{
+                    padding: "8px 16px",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    borderRadius: 8,
+                    border: `1px solid ${OBS_PALETTE.borderActive}`,
+                    background:
+                      registerAppBusy || !regId.trim() || !regExe.trim() ? "#e2e8f0" : "#2563eb",
+                    color: registerAppBusy || !regId.trim() || !regExe.trim() ? "#94a3b8" : "#fff",
+                    cursor:
+                      registerAppBusy || !regId.trim() || !regExe.trim() ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {registerAppBusy ? "提交中…" : "注册"}
+                </button>
               </div>
             </div>
           </div>

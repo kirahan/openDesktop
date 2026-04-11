@@ -6,13 +6,14 @@ describe("loadConfig", () => {
   it("uses OPENDESKTOP_DATA_DIR when set", () => {
     vi.stubEnv("OPENDESKTOP_DATA_DIR", "/tmp/od-data");
     const c = loadConfig();
-    expect(c.dataDir).toBe("/tmp/od-data");
+    expect(c.dataDir).toBe(path.resolve("/tmp/od-data"));
     vi.unstubAllEnvs();
   });
 
   it("overrides homedir-based default with explicit dataDir", () => {
+    const root = path.resolve("/custom/data");
     const c = loadConfig({ dataDir: "/custom/data" });
-    expect(c.dataDir).toBe("/custom/data");
+    expect(c.dataDir).toBe(root);
     expect(c.tokenFile).toMatch(/token\.txt$/);
   });
 
@@ -22,7 +23,8 @@ describe("loadConfig", () => {
   });
 
   it("defaults recipesDir under dataDir", () => {
+    const root = path.resolve("/custom/data");
     const c = loadConfig({ dataDir: "/custom/data" });
-    expect(c.recipesDir).toBe(path.join("/custom/data", "recipes"));
+    expect(c.recipesDir).toBe(path.resolve(path.join(root, "recipes")));
   });
 });

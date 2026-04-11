@@ -7,7 +7,13 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { runAppFirst } from "./cli/appFirstRun.js";
 import { runDoctor } from "./cli/doctorRun.js";
+import {
+  appIdExists,
+  formatAppIdConflictMessage,
+  parseAppIdsFromListJson,
+} from "./cli/appRegistrationHelpers.js";
 import { exitCodeForHttpStatus } from "./cli/mapHttpToExit.js";
+import { runAppBootstrapFlow } from "./cli/runAppBootstrapFlow.js";
 import { printSessionList } from "./cli/output.js";
 import { tryParseAppFirstArgv } from "./cli/parseAppFirstArgv.js";
 import { loadConfig } from "./config.js";
@@ -256,6 +262,18 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
         process.exit(1);
         return;
       }
+      const listRes = await apiFetch(program, "GET", "/v1/apps");
+      const listRaw = await listRes.text();
+      if (!listRes.ok) {
+        console.error(`无法拉取应用列表: HTTP ${listRes.status} ${listRaw.slice(0, 200)}`);
+        process.exit(exitCodeForHttpStatus(listRes.status));
+        return;
+      }
+      if (appIdExists(parseAppIdsFromListJson(listRaw), opts.id)) {
+        console.error(formatAppIdConflictMessage(opts.id));
+        process.exit(2);
+        return;
+      }
       const o = opts as { skipDebugInject?: boolean };
       const res = await apiFetch(program, "POST", "/v1/apps", {
         id: opts.id,
@@ -266,6 +284,85 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
         env: {},
         injectElectronDebugPort: !o.skipDebugInject,
       });
+      const text = await res.text();
+      console.log(text);
+      if (!res.ok) process.exit(exitCodeForHttpStatus(res.status));
+    });
+
+  appCmd
+    .command("bootstrap")
+    .description(
+      "注册应用并创建默认 Profile（profileId 默认为 <id>-default），可选立即创建会话；应用 id 即 yarn oc <appId> 中的调用名",
+    )
+    .requiredOption("--id <id>", "应用 ID（调用名，与 yarn oc <appId> 子命令一致）")
+    .requiredOption("--exe <path>", "可执行文件路径（如 Electron 或 node）")
+    .option("--cwd <path>", "工作目录", process.cwd())
+    .option(
+      "--args <json>",
+      '启动参数 JSON 数组，例如 ["--foo","bar"]',
+      "[]",
+    )
+    .option(
+      "--skip-debug-inject",
+      "不向子进程附加 --remote-debugging-port（默认会附加，供 Electron 调试用）",
+    )
+    .option(
+      "--profile-id <id>",
+      "默认 Profile 的 id（省略则为 <应用 id>-default）",
+    )
+    .option("--start", "创建默认 Profile 后立即创建会话（默认否）", false)
+    .action(async (opts) => {
+      let args: string[];
+      try {
+        args = JSON.parse(opts.args) as string[];
+        if (!Array.isArray(args)) throw new Error("args 必须是 JSON 数组");
+      } catch (e) {
+        console.error("--args 须为合法 JSON 数组:", e);
+        process.exit(1);
+        return;
+      }
+      const o = opts as { skipDebugInject?: boolean; profileId?: string; start?: boolean };
+      const profileId = (o.profileId?.trim() || `${opts.id}-default`) as string;
+      const result = await runAppBootstrapFlow(apiFetch, program, {
+        appId: opts.id,
+        executable: opts.exe,
+        cwd: opts.cwd,
+        args,
+        injectElectronDebugPort: !o.skipDebugInject,
+        profileId,
+        profileDisplayName: profileId,
+        startSession: Boolean(o.start),
+      });
+      if (!result.ok) {
+        result.messages.forEach((m) => console.error(m));
+        process.exit(result.exitCode);
+      }
+    });
+
+  appCmd
+    .command("remove")
+    .description(
+      "删除已注册应用（DELETE /v1/apps/:id；会停止该应用相关运行中会话，并移除其 Profile 与用户脚本记录）",
+    )
+    .requiredOption("--id <id>", "应用 ID")
+    .action(async (opts: { id: string }) => {
+      const res = await apiFetch(program, "DELETE", `/v1/apps/${encodeURIComponent(opts.id)}`);
+      if (res.status === 204) {
+        console.log(`已删除应用 ${opts.id}`);
+        return;
+      }
+      const text = await res.text();
+      console.error(text);
+      process.exit(exitCodeForHttpStatus(res.status));
+    });
+
+  const profileCmd = program.command("profile").description("Manage profiles（HTTP GET /v1/profiles）");
+
+  profileCmd
+    .command("list")
+    .description("列出已注册 Profile（JSON）")
+    .action(async () => {
+      const res = await apiFetch(program, "GET", "/v1/profiles");
       const text = await res.text();
       console.log(text);
       if (!res.ok) process.exit(exitCodeForHttpStatus(res.status));

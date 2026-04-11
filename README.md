@@ -67,10 +67,18 @@ yarn demo
 
 ```bash
 yarn oc app list
+yarn oc profile list
 yarn oc session list
 ```
 
-自定义应用（示例：用系统 `node` 跑某脚本）：
+**推荐：一条命令注册应用、默认 Profile，并可选用 `--start` 立即建会话**（`app.id` 即下方「调用名」，与 App-first 下 `yarn oc <appId> <子命令>` 一致；同一 exe 多套配置请**多次注册**，各用不同 id）：
+
+```bash
+yarn oc app bootstrap --id my-app --exe "$(which node)" --cwd "$PWD" --args '[]' --skip-debug-inject
+# 需要立刻有会话时再加：--start
+```
+
+自定义应用（仅注册应用、不建默认 Profile 时可用）：
 
 ```bash
 yarn oc app create --id my-app --exe "$(which node)" --cwd "$PWD" --args '["-e","console.log(1)"]' --skip-debug-inject

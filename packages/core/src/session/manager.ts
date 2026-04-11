@@ -255,6 +255,23 @@ export class SessionManager {
     return this.publicRecord(s);
   }
 
+  /**
+   * 应用删除等场景：移除与给定 Profile 关联的会话；`pending`/`starting`/`running` 会先 `stop`，再从内存表删除（含 `failed`/`killed`）。
+   */
+  async evictSessionsByProfileIds(profileIds: Set<string>): Promise<void> {
+    const ids = this.list()
+      .filter((s) => profileIds.has(s.profileId))
+      .map((s) => s.id);
+    for (const id of ids) {
+      const s = this.sessions.get(id);
+      if (!s) continue;
+      if (s.state === "pending" || s.state === "starting" || s.state === "running") {
+        await this.stop(id);
+      }
+      this.sessions.delete(id);
+    }
+  }
+
   subscribeLogs(sessionId: string, fn: (line: LogLine) => void): (() => void) | undefined {
     const s = this.sessions.get(sessionId);
     if (!s) return undefined;

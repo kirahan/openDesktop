@@ -333,4 +333,66 @@ describe("createApp HTTP", () => {
     expect(idx.status).toBe(200);
     expect(idx.text).toContain("x");
   });
+
+  it("DELETE /v1/apps/:id removes app, profiles, and user scripts for that app", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "tok", store, manager });
+    const auth = { Authorization: "Bearer tok" };
+    await request(app)
+      .post("/v1/apps")
+      .set(auth)
+      .send({
+        id: "rm-app",
+        name: "n",
+        executable: "/bin/true",
+        cwd: "/",
+        args: [],
+        env: {},
+        injectElectronDebugPort: false,
+      });
+    await request(app)
+      .post("/v1/profiles")
+      .set(auth)
+      .send({
+        id: "rm-prof",
+        appId: "rm-app",
+        name: "p",
+        env: {},
+        extraArgs: [],
+      });
+    const us = await store.readUserScripts();
+    us.scripts.push({
+      id: "s1",
+      appId: "rm-app",
+      source:
+        "// ==UserScript==\n// @name x\n// @match *\n// @grant none\n// ==/UserScript==\n",
+      metadata: { name: "x", matches: ["*"], grant: "none" },
+      updatedAt: new Date().toISOString(),
+    });
+    await store.writeUserScripts(us.scripts);
+
+    const del = await request(app).delete("/v1/apps/rm-app").set(auth);
+    expect(del.status).toBe(204);
+
+    const apps = await store.readApps();
+    expect(apps.apps.some((a) => a.id === "rm-app")).toBe(false);
+    const profs = await store.readProfiles();
+    expect(profs.profiles.some((p) => p.appId === "rm-app")).toBe(false);
+    const scripts = await store.readUserScripts();
+    expect(scripts.scripts.some((s) => s.appId === "rm-app")).toBe(false);
+  });
+
+  it("DELETE /v1/apps/:id returns 404 when app missing", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "tok", store, manager });
+    const res = await request(app).delete("/v1/apps/nope").set({ Authorization: "Bearer tok" });
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("APP_NOT_FOUND");
+  });
 });
