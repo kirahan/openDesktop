@@ -8,7 +8,7 @@
 
 ## 按应用用户脚本（UserScript 元数据存储）
 
-将油猴风格 `**// ==UserScript==` … `// ==/UserScript==`** 块写入 Core，按 `**appId**` 归属持久化（文件：`<dataDir>/user-scripts.json`）。解析后的 `**metadata.matches**` 为 `**@match` 原文列表**。`**@match` 不参与是否注入、注入到哪些 CDP target 的决策**（避免与 SPA 客户端路由语义混淆；规格见 `openspec/specs/app-user-scripts/spec.md`）。**不会在后台自动执行脚本**：需在会话 `**running**` 且允许脚本执行时，**显式调用**下方「注入」接口，将当前 app 下全部脚本 **正文** 注入到 **当时 CDP 枚举到的全部 `page` 类型 target**（同一脚本可能在多个 frame target 上各执行一次）。
+将油猴风格 `**// ==UserScript==` … `// ==/UserScript==`** 块写入 Core，按 `**appId`** 归属持久化（文件：`<dataDir>/user-scripts.json`）。解析后的 `**metadata.matches`** 为 `**@match` 原文列表**。`**@match` 不参与是否注入、注入到哪些 CDP target 的决策**（避免与 SPA 客户端路由语义混淆；规格见 `openspec/specs/app-user-scripts/spec.md`）。**不会在后台自动执行脚本**：需在会话 `**running**` 且允许脚本执行时，**显式调用**下方「注入」接口，将当前 app 下全部脚本 **正文** 注入到 **当时 CDP 枚举到的全部 `page` 类型 target**（同一脚本可能在多个 frame target 上各执行一次）。
 
 
 | 方法       | 路径                                                           | 说明                                                                                                                                               |
@@ -25,7 +25,7 @@
 
 **DOM 拾取（spike）流程**：先 `**dom-pick/arm**` → 在**被测应用窗口**内对页面 `**pointerdown**`（与常见「点击」一致）→ 再 `**dom-pick/resolve**` 取节点摘要。仅面向 **单一 `page` target`**；**无**操作系统级全局鼠标钩子。行为见` openspec/specs/cdp-dom-pick/spec.md`。
 
-`**@grant`** 仅允许 `**none**`（或可省略）；否则返回 `**USER_SCRIPT_GRANT_NOT_SUPPORTED**`。缺少 `**@name**` 返回 `**USER_SCRIPT_VALIDATION_ERROR**`。均需 **Bearer**。
+`**@grant`** 仅允许 `**none`**（或可省略）；否则返回 `**USER_SCRIPT_GRANT_NOT_SUPPORTED`**。缺少 `**@name**` 返回 `**USER_SCRIPT_VALIDATION_ERROR**`。均需 **Bearer**。
 
 ---
 
@@ -34,7 +34,7 @@
 - Core **默认只监听 127.0.0.1**，请勿在未配置防火墙时绑定 `0.0.0.0`。
 - `/v1/sessions/:id/cdp/`* 为调试流量，**不强制 Bearer**，以便 DevTools / CDP 客户端；依赖 **仅本机回环** 与上游会话隔离。
 - **CDP 等效高权限**：可执行页面脚本与访问调试协议，勿向公网暴露。
-- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close`、`renderer-globals`、`runtime-exception`、`**POST .../user-scripts/inject`**、`**POST .../dom-pick/arm**`、`**POST .../dom-pick/resolve**` 等）需会话侧 `**allowScriptExecution: true**`（`**POST /v1/profiles` 新建 Profile 时默认 `true**`；旧数据或未迁移会话仍可能为 `false`，可显式传 `allowScriptExecution: false` 关闭）。只读类（如 `state`、`get`、`explore`、`screenshot`、`network`、`network-observe`、`console-messages`、`window-state`）以及仅 `ms`、不含 `selector` 的 `wait`、以及窗口前置 `focus-window` 不需要。
+- `**/v1/agent/*`** 与语义动作受 Bearer + **限流**约束；会改导航、执行脚本或模拟输入的动作（如 `open`、`eval`、`click`、`type`、`back`、`close`、`renderer-globals`、`runtime-exception`、`**POST .../user-scripts/inject`**、`**POST .../dom-pick/arm`**、`**POST .../dom-pick/resolve**` 等）需会话侧 `**allowScriptExecution: true**`（`**POST /v1/profiles` 新建 Profile 时默认 `true**`；旧数据或未迁移会话仍可能为 `false`，可显式传 `allowScriptExecution: false` 关闭）。只读类（如 `state`、`get`、`explore`、`screenshot`、`network`、`network-observe`、`console-messages`、`window-state`）以及仅 `ms`、不含 `selector` 的 `wait`、以及窗口前置 `focus-window` 不需要。
 
 ---
 

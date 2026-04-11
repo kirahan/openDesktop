@@ -39,13 +39,14 @@
 | `core status` | 根据 pid 文件判断是否在跑                                                        |
 | `core stop`   | 向 pid 对应进程发 SIGTERM                                                    |
 
+
 ### `core start` 与 Web 静态目录
 
-Core 可选托管 **SPA 静态目录**（与 API 同源）。解析 **`webDist`** 的优先级为（后者仅在前者未提供时生效）：
+Core 可选托管 **SPA 静态目录**（与 API 同源）。解析 `**webDist`** 的优先级为（后者仅在前者未提供时生效）：
 
-1. **`--web-dist <path>`** — 命令行显式指定目录。
+1. `**--web-dist <path>**` — 命令行显式指定目录。
 2. **环境变量 `OPENDESKTOP_WEB_DIST`** — 指向目录路径。
-3. **随包默认**：若 CLI 入口旁存在 **`../web-dist/index.html`**（例如全局安装的 `@hanzhao111/opendesktop` 包内布局），则自动使用该 `web-dist` 目录。
+3. **随包默认**：若 CLI 入口旁存在 `**../web-dist/index.html`**（例如全局安装的 `@hanzhao111/opendesktop` 包内布局），则自动使用该 `web-dist` 目录。
 
 以上均未命中时，Core **仅提供 HTTP API**（根路径无 SPA）。启动成功后的终端提示会区分「已托管 Web」与「仅 API」。
 
@@ -135,8 +136,8 @@ yarn opd -- --session <session-uuid> demo-mock list-window
 
 Core 与 CLI 常用：
 
-- **`OPENDESKTOP_WEB_DIST`** — `core start` 时作为 Web 静态目录（优先级低于 `--web-dist`，高于随包 `web-dist` 探测）。
-- **`OPENDESKTOP_API_URL`**、**`OPENDESKTOP_TOKEN_FILE`** — 见上文「全局选项」。
+- `**OPENDESKTOP_WEB_DIST`** — `core start` 时作为 Web 静态目录（优先级低于 `--web-dist`，高于随包 `web-dist` 探测）。
+- `**OPENDESKTOP_API_URL**`、`**OPENDESKTOP_TOKEN_FILE**` — 见上文「全局选项」。
 
 与 Agent / 观测相关（完整列表见 [API 与观测](./API.md) 及代码）：
 
