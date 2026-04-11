@@ -12,7 +12,7 @@
     "oc": "yarn workspace @opendesktop/core cli",
     "dev:core": "yarn workspace @opendesktop/core run dev core start --port 8787",
     "dev:web": "yarn workspace @opendesktop/web run dev:host",
-    "dev:core:ui": "yarn workspace @opendesktop/core run dev core start --port 8787 --web-dist ./packages/web/dist",
+    "dev:core:ui": "yarn workspace @opendesktop/core run dev core start --port 8787 --web-dist ../web/dist",
     "app:demo": "yarn oc app init-demo",
     "demo": "yarn oc app init-demo && yarn oc session start demo",
     "cdp:list-windows": "yarn workspace @opendesktop/cdp-probe run list",

@@ -15,6 +15,22 @@ import { loadConfig } from "./config.js";
 import { startDaemon } from "./daemon.js";
 import { readPid, pidPath } from "./pidfile.js";
 
+/** 前台启动提示用 ANSI 色（TTY 且未设置 NO_COLOR 时启用） */
+const ttyHint = (() => {
+  const on = process.stdout.isTTY && !process.env.NO_COLOR;
+  const w = (code: string, s: string) => (on ? `\x1b[${code}m${s}\x1b[0m` : s);
+  return {
+    banner: (s: string) => w("1;36", s),
+    dim: (s: string) => w("2", s),
+    url: (s: string) => w("36", s),
+    token: (s: string) => w("33", s),
+    path: (s: string) => w("90", s),
+    cmd: (s: string) => w("32", s),
+    section: (s: string) => w("1;35", s),
+    bullet: (s: string) => w("35", s),
+  };
+})();
+
 function getRootCommand(cmd: Command): Command {
   let c: Command = cmd;
   while (c.parent) c = c.parent;
@@ -120,10 +136,47 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
         webDist: opts.webDist,
       });
       const base = `http://${d.config.host}:${d.config.port}`;
-      console.log(`OpenDesktop Core listening at ${base}`);
+      console.log(
+        `${ttyHint.banner("OpenDesktop Core")} ${ttyHint.dim("listening at")} ${ttyHint.url(base)}`,
+      );
       const cfg = loadConfig({ dataDir: opts.dataDir });
-      console.log(`Token: ${d.token}`);
-      console.log(`Token file: ${cfg.tokenFile}`);
+      console.log(`${ttyHint.dim("Token:")} ${ttyHint.token(d.token)}`);
+      console.log(`${ttyHint.dim("Token file:")} ${ttyHint.path(cfg.tokenFile)}`);
+      console.log("");
+      console.log(ttyHint.section("接下来可以："));
+      if (d.config.webDist) {
+        console.log(
+          `  ${ttyHint.bullet("·")} 在浏览器打开 ${ttyHint.url(`${base}/`)} ，将 Token 粘贴到 Bearer，使用 Web 控制台（与 API 同源）。`,
+        );
+      } else {
+        console.log(
+          `  ${ttyHint.bullet("·")} 在浏览器打开 ${ttyHint.url(`${base}/`)} 可访问同源界面（若启动时未传 --web-dist 则无 SPA，仅 API）。`,
+        );
+      }
+      const defaultApiBase = "http://127.0.0.1:8787";
+      const coreUsesDefaults = base === defaultApiBase && opts.dataDir === undefined;
+      if (coreUsesDefaults) {
+        console.log(
+          `  ${ttyHint.bullet("·")} 命令行：${ttyHint.dim("默认已对齐本机 — 未传 --api-url 时使用")} ${ttyHint.url(defaultApiBase)}${ttyHint.dim("，Token 从默认数据目录的 token.txt 读取（与上方路径一致）。另开终端可直接：")}`,
+        );
+        console.log(`      ${ttyHint.cmd("od app list")}`);
+        console.log(`      ${ttyHint.cmd("od session list")}`);
+        console.log(`      ${ttyHint.cmd("od doctor")}`);
+        console.log(
+          `  ${ttyHint.dim("若改过 Core 的 --port、--host 或 --data-dir，请加上 od --api-url 与 --token-file，或设置 OPENDESKTOP_* 环境变量。")}`,
+        );
+      } else {
+        const apiFlag = `--api-url ${base}`;
+        const tokenFlag = `--token-file ${cfg.tokenFile}`;
+        console.log(
+          `  ${ttyHint.bullet("·")} 命令行：当前 Core 非默认端口、主机或数据目录，另开终端请显式指定 API 与 Token 文件，例如：`,
+        );
+        console.log(`      ${ttyHint.cmd(`od ${apiFlag} ${tokenFlag} app list`)}`);
+        console.log(`      ${ttyHint.cmd(`od ${apiFlag} ${tokenFlag} doctor`)}`);
+        console.log(
+          `  ${ttyHint.dim("也可先 set OPENDESKTOP_API_URL / OPENDESKTOP_TOKEN_FILE（或 export、$env:...），再直接 od app list。")}`,
+        );
+      }
       const shutdown = async () => {
         await d.stop();
         process.exit(0);
