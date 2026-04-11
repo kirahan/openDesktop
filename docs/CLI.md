@@ -80,7 +80,7 @@ yarn oc <appId> list-window | metrics | snapshot | list-global | explore | netwo
 yarn oc <appId> topology   # 与 list-window 等价
 ```
 
-`yarn oc` 等价于 `yarn workspace @opendesktop/core cli`；全局安装时入口名为 `od`。
+`yarn oc` 等价于 `yarn workspace @opendesktop/core cli`；从 npm 全局安装发行包时入口名为 `od`（例如 `npm install -g @hanzhao111/opendesktop`）。
 
 常用可选参数（与 `od --help` 文末一致）：
 

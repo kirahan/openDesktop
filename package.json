@@ -6,7 +6,7 @@
   ],
   "scripts": {
     "build": "npm run build -w @opendesktop/web && npm run build -w @opendesktop/core",
-    "test": "npm run test -w @opendesktop/core",
+    "test": "npm run test -w @opendesktop/core && npm run test -w @hanzhao111/opendesktop",
     "lint": "npm run lint -w @opendesktop/core",
     "od": "node packages/core/dist/cli.js",
     "oc": "yarn workspace @opendesktop/core cli",

@@ -8,7 +8,19 @@
 
 - **Node.js ≥ 20.19**（需 `fetch`、较新 TypeScript 工具链）
 
-## 安装与构建
+## npm 安装（发行版）
+
+若只需使用已发布的 CLI，可从 npm 全局安装 **`@hanzhao111/opendesktop`**（发布包源码位于本仓库 `packages/opendesktop`；因与已有包名过于相近，registry 要求使用 scoped 名称）：
+
+```bash
+npm install -g @hanzhao111/opendesktop
+od --help
+od core start --port 8787
+```
+
+参与本仓库开发或需要完整 monorepo 构建时，请使用下文「安装与构建」，勿与仅安装 CLI 的路径混淆。
+
+## 安装与构建（源码）
 
 在仓库根目录 `openDesktop/`：
 

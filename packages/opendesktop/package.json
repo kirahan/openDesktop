@@ -1,0 +1,41 @@
+{
+  "name": "@hanzhao111/opendesktop",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "OpenDesktop CLI：调试会话控制面（Core HTTP API 与 od 命令行）",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "od": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "prepublishOnly": "node ./scripts/prepublish-sync.mjs",
+    "test": "node --test ./package.test.mjs"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0-rc.12",
+    "commander": "^12.1.0",
+    "domhandler": "^5.0.3",
+    "express": "^4.21.2",
+    "http-proxy": "^1.18.1",
+    "pidusage": "^4.0.1",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "keywords": [
+    "opendesktop",
+    "electron",
+    "debug",
+    "cli"
+  ]
+}

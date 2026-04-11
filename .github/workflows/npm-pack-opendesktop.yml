@@ -1,0 +1,33 @@
+name: npm pack opendesktop
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19"
+          cache: yarn
+      - name: Install
+        run: yarn install --frozen-lockfile
+      - name: Sync opendesktop dist from core
+        run: node packages/opendesktop/scripts/prepublish-sync.mjs
+      - name: Dry-run pack
+        run: cd packages/opendesktop && npm pack --dry-run
+      - name: Pack and assert tarball
+        run: |
+          set -e
+          cd packages/opendesktop
+          BEFORE=$(ls -1)
+          npm pack --pack-destination .
+          TGZ=$(ls -1 | grep '\.tgz$' | head -1)
+          test -n "$TGZ"
+          tar -tzf "$TGZ" | grep -q 'package/LICENSE'
+          ! tar -tzf "$TGZ" | grep -q 'openspec' || (echo 'tarball must not contain openspec' && exit 1)
+          rm -f "$TGZ"
