@@ -63,8 +63,8 @@ export function printCoreUnreachableHelp(
   writeLine(ttyErr.dim("请先在本机启动 Core，例如在仓库根目录："));
   writeLine(`  ${ttyErr.cmd("yarn dev:core")}`);
   writeLine(`  ${ttyErr.cmd("yarn dev:core:ui")}`);
-  writeLine(ttyErr.dim("或使用 od："));
-  writeLine(`  ${ttyErr.cmd("od core start --port 8787")}`);
-  writeLine(ttyErr.dim("若 Core 不在默认地址，请使用 od --api-url 或设置 OPENDESKTOP_API_URL。"));
+  writeLine(ttyErr.dim("或使用 opd（全局安装发行包时通常可直接带随包 Web）："));
+  writeLine(`  ${ttyErr.cmd("opd core start --port 8787")}`);
+  writeLine(ttyErr.dim("自定义静态目录时加 --web-dist；若 Core 不在默认地址，请使用 opd --api-url 或设置 OPENDESKTOP_API_URL。"));
   writeLine("");
 }

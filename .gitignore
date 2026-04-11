@@ -1,6 +1,8 @@
 node_modules
 dist
+packages/opendesktop/web-dist
 *.log
 .DS_Store
 coverage
 .turbo
+packages/opendesktop/*.tgz

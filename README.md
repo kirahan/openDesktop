@@ -14,9 +14,11 @@
 
 ```bash
 npm install -g @hanzhao111/opendesktop
-od --help
-od core start --port 8787
+opd --help
+opd core start --port 8787
 ```
+
+全局命令为 **`opd`**（与源码目录里 `yarn opd` 一致）。**发行包**若随包带有 `web-dist`，`opd core start` 会**默认**托管 Web 控制台（无需再手写 `--web-dist`）；优先级与自定义方式见 **[docs/CLI.md](docs/CLI.md)**。**不发 npm 的本地验证**（pack、link、从目录安装）见 `packages/opendesktop/README.md`。
 
 参与本仓库开发或需要完整 monorepo 构建时，请使用下文「安装与构建」，勿与仅安装 CLI 的路径混淆。
 
@@ -34,21 +36,21 @@ yarn build
 ## 启动 Core（前台）
 
 ```bash
-yarn od -- core start --port 8787
+yarn opd -- core start --port 8787
 ```
 
 首次运行会在数据目录生成 `token.txt`（默认 macOS：`~/Library/Application Support/OpenDesktop/token.txt`）。启动时终端会**直接打印 `Token: …`**，复制到 Web UI 的 Bearer 字段即可。**请妥善保管**：持有 token 即相当于持有本机 Control API 权限。
 
-带 Web UI（同源）：
+**Web 静态目录**（可选）：CLI 会按 **`--web-dist` > `OPENDESKTOP_WEB_DIST` > 随包 `web-dist`** 解析；详见 [docs/CLI.md](docs/CLI.md)。在 monorepo 里用本仓库构建的 Web 时：
 
 ```bash
-yarn od -- core start --web-dist "$(pwd)/packages/web/dist"
+yarn opd -- core start --web-dist "$(pwd)/packages/web/dist"
 ```
 
 浏览器打开 `http://127.0.0.1:8787/`，在页面中粘贴 `token.txt` 内容。或使用：
 
 ```bash
-yarn od -- open --path /
+yarn opd -- open --path /
 ```
 
 ## 一键创建应用配置（推荐）
@@ -101,6 +103,7 @@ yarn oc app create --id my-app --exe "$(which node)" --cwd "$PWD" --args '[]' --
 | [docs/CLI.md](docs/CLI.md) | 命令树、App-first、`doctor`、`--format`、退出码、环境变量 |
 | [docs/API.md](docs/API.md) | UserScript、Bearer 端点表、Agent 动词、SSE、Playwright CDP URL |
 | [docs/PRODUCT.md](docs/PRODUCT.md) | OpenSpec 能力总览（SHALL），与操作手册分工说明 |
+| [docs/npm-publish.md](docs/npm-publish.md) | 维护者：`@hanzhao111/opendesktop` 发布前测试、`prepublish` 同步与 `npm publish` |
 
 ## CLI 快速示例
 
@@ -108,11 +111,11 @@ yarn oc app create --id my-app --exe "$(which node)" --cwd "$PWD" --args '[]' --
 export OPENDESKTOP_API_URL=http://127.0.0.1:8787
 export OPENDESKTOP_TOKEN_FILE=~/Library/Application\ Support/OpenDesktop/token.txt
 
-yarn od -- app list
-yarn od -- session list
-yarn od -- session list -f json
-yarn od -- doctor
-yarn od -- doctor -f json --app demo-mock
+yarn opd -- app list
+yarn opd -- session list
+yarn opd -- session list -f json
+yarn opd -- doctor
+yarn opd -- doctor -f json --app demo-mock
 ```
 
 App-first、子命令全表与退出码见 **[docs/CLI.md](docs/CLI.md)**。
@@ -154,7 +157,7 @@ yarn dev:core:ui
 
 **前后端分开**：终端 1 `yarn dev:core`；终端 2 `yarn dev:web`，浏览器打开 Vite 提示的地址（常为 `http://127.0.0.1:5173`），API 可走 Vite 代理到 Core。**Bearer** 用终端 `Token:` 或 `token.txt`。
 
-**与生产一致**：`yarn build` 后 `yarn od -- core start --web-dist "$(pwd)/packages/web/dist"`。
+**与生产一致**：`yarn build` 后 `yarn opd -- core start --web-dist "$(pwd)/packages/web/dist"`。
 
 ## 开发常用命令
 
@@ -167,5 +170,5 @@ yarn docs:check-links
 
 ## 仓库结构
 
-- `packages/core`：守护进程、HTTP API、CDP 代理、CLI（`od`）
+- `packages/core`：守护进程、HTTP API、CDP 代理、CLI（`opd`）
 - `packages/web`：Vite + React 控制台（可选）；详见 [packages/web/README.md](packages/web/README.md)

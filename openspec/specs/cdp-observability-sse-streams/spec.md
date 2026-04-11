@@ -71,7 +71,7 @@
 
 ### Requirement: App-first CLI 与观测能力对齐（可选交付物）
 
-本变更所涉 **网络 / 控制台 / 异常栈** 的短时采样与 **GET + SSE** 长流，SHALL 在 OpenDesktop CLI（`od` / workspace `yarn oc`）中可通过 **App-first** 形式调用，且子命令与 **HTTP API** 的对应关系 SHALL 与 `design.md` 中「App-first CLI」表格一致，便于与 `curl -N` 并列使用。
+本变更所涉 **网络 / 控制台 / 异常栈** 的短时采样与 **GET + SSE** 长流，SHALL 在 OpenDesktop CLI（`opd` / workspace `yarn oc`）中可通过 **App-first** 形式调用，且子命令与 **HTTP API** 的对应关系 SHALL 与 `design.md` 中「App-first CLI」表格一致，便于与 `curl -N` 并列使用。
 
 #### Scenario: 帮助信息列出子命令
 

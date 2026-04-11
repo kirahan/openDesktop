@@ -1,4 +1,4 @@
-/** sysexits 对齐的 CLI 退出码（OpenDesktop od） */
+/** sysexits 对齐的 CLI 退出码（OpenDesktop opd） */
 export const EX_OK = 0;
 export const EX_USAGE = 2;
 export const EX_NOINPUT = 66;

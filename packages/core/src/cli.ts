@@ -7,6 +7,7 @@ import { Command } from "commander";
 import { runAppFirst } from "./cli/appFirstRun.js";
 import { runDoctor } from "./cli/doctorRun.js";
 import { CoreUnreachableError, printCoreUnreachableHelp } from "./cli/coreUnreachable.js";
+import { resolveBundledWebDistFromCliDir } from "./cli/resolveBundledWebDist.js";
 import { buildCliHttpContext, fetchWithBearer } from "./cli/httpClient.js";
 import { exitCodeForFetchError, exitCodeForHttpStatus } from "./cli/mapHttpToExit.js";
 import { runAppBootstrapFlow } from "./cli/runAppBootstrapFlow.js";
@@ -92,7 +93,7 @@ async function main() {
 
   const program = new Command();
   program
-    .name("od")
+    .name("opd")
     .description(
       "OpenDesktop CLI — local Electron debug session control plane。App-first：yarn oc <appId> <子命令>（见下方说明）。",
     )
@@ -110,7 +111,7 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
         network-stream: --no-strip-query|--max-events-per-second（SSE；--format 不适用）
         console-observe | stack-observe: --wait-ms（短时采样 JSON，100～30000）
         console-stream | stack-stream: SSE 长流（Ctrl+C 结束；stack 需会话允许脚本执行）
-全局安装的入口名为 od，与 yarn oc 指向同一 CLI。`,
+全局安装后命令名为 opd（npm 包 @hanzhao111/opendesktop），与 yarn oc 指向同一 CLI。`,
     );
 
   const core = program.command("core").description("Control the Core daemon");
@@ -123,19 +124,21 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
     .option("--data-dir <path>", "Data directory")
     .option("--web-dist <path>", "Static web UI (SPA) directory")
     .action(async (opts) => {
+      const cliJsDir = path.dirname(fileURLToPath(import.meta.url));
+      const effectiveWebDist =
+        opts.webDist ?? process.env.OPENDESKTOP_WEB_DIST ?? resolveBundledWebDistFromCliDir(cliJsDir);
       const d = await startDaemon({
         port: Number(opts.port),
         host: opts.host,
         dataDir: opts.dataDir,
-        webDist: opts.webDist,
+        webDist: effectiveWebDist,
       });
       const base = `http://${d.config.host}:${d.config.port}`;
       console.log(
         `${ttyHint.banner("OpenDesktop Core")} ${ttyHint.dim("listening at")} ${ttyHint.url(base)}`,
       );
-      const cfg = loadConfig({ dataDir: opts.dataDir });
       console.log(`${ttyHint.dim("Token:")} ${ttyHint.token(d.token)}`);
-      console.log(`${ttyHint.dim("Token file:")} ${ttyHint.path(cfg.tokenFile)}`);
+      console.log(`${ttyHint.dim("Token file:")} ${ttyHint.path(d.config.tokenFile)}`);
       console.log("");
       console.log(ttyHint.section("接下来可以："));
       if (d.config.webDist) {
@@ -144,7 +147,7 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
         );
       } else {
         console.log(
-          `  ${ttyHint.bullet("·")} 在浏览器打开 ${ttyHint.url(`${base}/`)} 可访问同源界面（若启动时未传 --web-dist 则无 SPA，仅 API）。`,
+          `  ${ttyHint.bullet("·")} 当前未配置 Web 静态目录（未传 --web-dist、未设置 OPENDESKTOP_WEB_DIST、且未检测到随包 web-dist），${ttyHint.url(`${base}/`)} 仅提供 API。`,
         );
       }
       const defaultApiBase = "http://127.0.0.1:8787";
@@ -153,22 +156,22 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
         console.log(
           `  ${ttyHint.bullet("·")} 命令行：${ttyHint.dim("默认已对齐本机 — 未传 --api-url 时使用")} ${ttyHint.url(defaultApiBase)}${ttyHint.dim("，Token 从默认数据目录的 token.txt 读取（与上方路径一致）。另开终端可直接：")}`,
         );
-        console.log(`      ${ttyHint.cmd("od app list")}`);
-        console.log(`      ${ttyHint.cmd("od session list")}`);
-        console.log(`      ${ttyHint.cmd("od doctor")}`);
+        console.log(`      ${ttyHint.cmd("opd app list")}`);
+        console.log(`      ${ttyHint.cmd("opd session list")}`);
+        console.log(`      ${ttyHint.cmd("opd doctor")}`);
         console.log(
-          `  ${ttyHint.dim("若改过 Core 的 --port、--host 或 --data-dir，请加上 od --api-url 与 --token-file，或设置 OPENDESKTOP_* 环境变量。")}`,
+          `  ${ttyHint.dim("若改过 Core 的 --port、--host 或 --data-dir，请加上 opd --api-url 与 --token-file，或设置 OPENDESKTOP_* 环境变量。")}`,
         );
       } else {
         const apiFlag = `--api-url ${base}`;
-        const tokenFlag = `--token-file ${cfg.tokenFile}`;
+        const tokenFlag = `--token-file ${d.config.tokenFile}`;
         console.log(
           `  ${ttyHint.bullet("·")} 命令行：当前 Core 非默认端口、主机或数据目录，另开终端请显式指定 API 与 Token 文件，例如：`,
         );
-        console.log(`      ${ttyHint.cmd(`od ${apiFlag} ${tokenFlag} app list`)}`);
-        console.log(`      ${ttyHint.cmd(`od ${apiFlag} ${tokenFlag} doctor`)}`);
+        console.log(`      ${ttyHint.cmd(`opd ${apiFlag} ${tokenFlag} app list`)}`);
+        console.log(`      ${ttyHint.cmd(`opd ${apiFlag} ${tokenFlag} doctor`)}`);
         console.log(
-          `  ${ttyHint.dim("也可先 set OPENDESKTOP_API_URL / OPENDESKTOP_TOKEN_FILE（或 export、$env:...），再直接 od app list。")}`,
+          `  ${ttyHint.dim("也可先 set OPENDESKTOP_API_URL / OPENDESKTOP_TOKEN_FILE（或 export、$env:...），再直接 opd app list。")}`,
         );
       }
       const shutdown = async () => {
@@ -276,7 +279,7 @@ App-first（免手写 sessionId，monorepo 下常用 yarn oc）:
 
       console.log("");
       console.log("下一步：创建会话");
-      console.log("  od session start demo");
+      console.log("  opd session start demo");
     });
 
   appCmd

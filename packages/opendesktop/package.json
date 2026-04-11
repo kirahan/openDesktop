@@ -1,23 +1,26 @@
 {
   "name": "@hanzhao111/opendesktop",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "publishConfig": {
     "access": "public"
   },
-  "description": "OpenDesktop CLI：调试会话控制面（Core HTTP API 与 od 命令行）",
+  "description": "OpenDesktop CLI：调试会话控制面（Core HTTP API 与 opd 命令行）",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "od": "./dist/cli.js"
+    "opd": "./dist/cli.js"
   },
   "main": "./dist/index.js",
   "files": [
     "dist",
+    "web-dist",
     "LICENSE",
     "README.md"
   ],
   "scripts": {
     "prepublishOnly": "node ./scripts/prepublish-sync.mjs",
+    "sync": "node ./scripts/prepublish-sync.mjs",
+    "start:web": "node dist/cli.js core start --web-dist ./web-dist",
     "test": "node --test ./package.test.mjs"
   },
   "dependencies": {

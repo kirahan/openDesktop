@@ -27,4 +27,18 @@ describe("loadConfig", () => {
     const c = loadConfig({ dataDir: "/custom/data" });
     expect(c.recipesDir).toBe(path.resolve(path.join(root, "recipes")));
   });
+
+  it("uses OPENDESKTOP_WEB_DIST for webDist when no override", () => {
+    vi.stubEnv("OPENDESKTOP_WEB_DIST", "/tmp/od-web");
+    const c = loadConfig({ dataDir: "/x" });
+    expect(c.webDist).toBe(path.resolve("/tmp/od-web"));
+    vi.unstubAllEnvs();
+  });
+
+  it("override webDist wins over OPENDESKTOP_WEB_DIST", () => {
+    vi.stubEnv("OPENDESKTOP_WEB_DIST", "/env/web");
+    const c = loadConfig({ dataDir: "/x", webDist: "/flag/web" });
+    expect(c.webDist).toBe(path.resolve("/flag/web"));
+    vi.unstubAllEnvs();
+  });
 });

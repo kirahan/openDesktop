@@ -83,7 +83,7 @@ export interface AppFirstParseErr {
 export type AppFirstParseResult = AppFirstParseOk | AppFirstParseErr | { kind: "not-app-first" };
 
 /**
- * 自 process.argv.slice(2) 解析 App-first：`od [flags] <appId> <子命令>`（`topology` 为 list-window 别名；含 network/console/stack 的 observe|stream）
+ * 自 process.argv.slice(2) 解析 App-first：`opd [flags] <appId> <子命令>`（`topology` 为 list-window 别名；含 network/console/stack 的 observe|stream）
  */
 export function tryParseAppFirstArgv(argv: string[]): AppFirstParseResult {
   const opts: {

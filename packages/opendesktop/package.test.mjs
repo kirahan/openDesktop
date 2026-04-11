@@ -27,18 +27,23 @@ test("package.json 与 spec 一致的 name、license、bin、files", () => {
   const pkg = readPackageJson();
   assert.equal(pkg.name, "@hanzhao111/opendesktop");
   assert.equal(pkg.license, "MIT");
-  assert.equal(pkg.bin?.od, "./dist/cli.js");
+  assert.equal(pkg.bin?.opd, "./dist/cli.js");
   assert.ok(Array.isArray(pkg.files));
-  assert.deepEqual(new Set(pkg.files), new Set(["dist", "LICENSE", "README.md"]));
+  assert.deepEqual(
+    new Set(pkg.files),
+    new Set(["dist", "web-dist", "LICENSE", "README.md"]),
+  );
 });
 
-test("prepublish 同步后 dist/cli.js 存在且 od --help 成功", () => {
+test("prepublish 同步后 dist/cli.js 存在且 CLI --help 成功", () => {
   execFileSync(process.execPath, [join(pkgRoot, "scripts", "prepublish-sync.mjs")], {
     cwd: pkgRoot,
     stdio: "inherit",
   });
   const cli = join(pkgRoot, "dist", "cli.js");
+  const webIndex = join(pkgRoot, "web-dist", "index.html");
   assert.ok(existsSync(cli), "dist/cli.js 应存在");
+  assert.ok(existsSync(webIndex), "web-dist/index.html 应存在");
   const out = execFileSync(process.execPath, [cli, "--help"], {
     encoding: "utf8",
   });
@@ -74,6 +79,7 @@ test("npm pack 解压后不含 openspec 路径", () => {
     process.chdir(prev);
   }
   assert.ok(list.includes("package/LICENSE"), "tarball 应含 LICENSE");
+  assert.ok(list.includes("package/web-dist/index.html"), "tarball 应含 Web 静态入口");
   assert.ok(!list.includes("openspec"), "tarball 不应含 openspec 路径");
   unlinkSync(abs);
 });
