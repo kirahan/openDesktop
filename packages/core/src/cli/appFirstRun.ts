@@ -1,4 +1,5 @@
 import process from "node:process";
+import { CoreUnreachableError, isCoreUnreachableError, printCoreUnreachableHelp } from "./coreUnreachable.js";
 import { EX_NOINPUT, EX_USAGE } from "./exitCodes.js";
 import type { CliHttpContext } from "./httpClient.js";
 import { buildCliHttpContext, fetchWithBearer } from "./httpClient.js";
@@ -90,6 +91,20 @@ async function pumpSseGet(
     if (ac.signal.aborted) return 130;
     const name = e instanceof Error ? e.name : "";
     if (name === "AbortError") return 130;
+    if (isCoreUnreachableError(e)) {
+      const base =
+        e instanceof CoreUnreachableError
+          ? e.baseUrl
+          : (() => {
+              try {
+                return new URL(url).origin;
+              } catch {
+                return "http://127.0.0.1:8787";
+              }
+            })();
+      printCoreUnreachableHelp(base, (line) => writeErr(line));
+      return exitCodeForFetchError(e);
+    }
     writeErr(e instanceof Error ? e.message : String(e));
     return exitCodeForFetchError(e);
   } finally {
@@ -359,6 +374,10 @@ export async function runAppFirst(
     printStructured(data, parsed.format, writeOut);
     return 0;
   } catch (e) {
+    if (e instanceof CoreUnreachableError) {
+      printCoreUnreachableHelp(e.baseUrl, (line) => writeErr(line));
+      return exitCodeForFetchError(e);
+    }
     writeErr(e instanceof Error ? e.message : String(e));
     return exitCodeForFetchError(e);
   }

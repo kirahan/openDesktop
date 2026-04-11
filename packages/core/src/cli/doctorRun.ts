@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 import { loadConfig } from "../config.js";
+import { CoreUnreachableError } from "./coreUnreachable.js";
 import { EX_CONFIG, EX_NOPERM, EX_UNAVAILABLE } from "./exitCodes.js";
 import { buildCliHttpContext, fetchPublicBase, fetchWithBearer } from "./httpClient.js";
 import { pickLatestActiveSessionForApp, type ProfileRow, type SessionRow } from "./sessionResolve.js";
@@ -39,7 +40,8 @@ export async function runDoctor(
       coreDetail = `${coreDetail} ${t.slice(0, 200)}`;
     }
   } catch (e) {
-    coreDetail = e instanceof Error ? e.message : String(e);
+    coreDetail =
+      e instanceof CoreUnreachableError ? "无法连接（请先启动 Core）" : e instanceof Error ? e.message : String(e);
   }
 
   let tokenPath = "";
@@ -66,7 +68,8 @@ export async function runDoctor(
         authDetail = "Bearer 无效或缺失";
       }
     } catch (e) {
-      authDetail = e instanceof Error ? e.message : String(e);
+      authDetail =
+        e instanceof CoreUnreachableError ? "无法连接（请先启动 Core）" : e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -91,7 +94,8 @@ export async function runDoctor(
       }
     } catch (e) {
       appSessionOk = false;
-      appSessionDetail = e instanceof Error ? e.message : String(e);
+      appSessionDetail =
+        e instanceof CoreUnreachableError ? "无法连接（请先启动 Core）" : e instanceof Error ? e.message : String(e);
     }
   }
 

@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 import { loadConfig } from "../config.js";
+import { CoreUnreachableError, isCoreUnreachableError } from "./coreUnreachable.js";
 
 export interface CliHttpContext {
   baseUrl: string;
@@ -25,17 +26,32 @@ export async function fetchWithBearer(
   body?: unknown,
 ): Promise<Response> {
   const url = `${ctx.baseUrl}${apiPath}`;
-  return fetch(url, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${ctx.token}`,
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  try {
+    return await fetch(url, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${ctx.token}`,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    if (isCoreUnreachableError(e)) {
+      throw new CoreUnreachableError(ctx.baseUrl);
+    }
+    throw e;
+  }
 }
 
 export async function fetchPublicBase(baseUrl: string, apiPath: string): Promise<Response> {
-  const url = `${baseUrl.replace(/\/$/, "")}${apiPath}`;
-  return fetch(url, { method: "GET" });
+  const base = baseUrl.replace(/\/$/, "");
+  const url = `${base}${apiPath}`;
+  try {
+    return await fetch(url, { method: "GET" });
+  } catch (e) {
+    if (isCoreUnreachableError(e)) {
+      throw new CoreUnreachableError(base);
+    }
+    throw e;
+  }
 }

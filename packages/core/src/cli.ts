@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import { exec } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { runAppFirst } from "./cli/appFirstRun.js";
 import { runDoctor } from "./cli/doctorRun.js";
-import { exitCodeForHttpStatus } from "./cli/mapHttpToExit.js";
+import { CoreUnreachableError, printCoreUnreachableHelp } from "./cli/coreUnreachable.js";
+import { buildCliHttpContext, fetchWithBearer } from "./cli/httpClient.js";
+import { exitCodeForFetchError, exitCodeForHttpStatus } from "./cli/mapHttpToExit.js";
 import { runAppBootstrapFlow } from "./cli/runAppBootstrapFlow.js";
 import { printSessionList } from "./cli/output.js";
 import { tryParseAppFirstArgv } from "./cli/parseAppFirstArgv.js";
@@ -41,12 +42,6 @@ function rootOpts(cmd: Command): { apiUrl?: string; tokenFile?: string } {
   return getRootCommand(cmd).opts() as { apiUrl?: string; tokenFile?: string };
 }
 
-async function readTokenFromOpts(cmd: Command): Promise<string> {
-  const opts = rootOpts(cmd);
-  const config = loadConfig({ tokenFile: opts.tokenFile });
-  return (await readFile(config.tokenFile, "utf8")).trim();
-}
-
 async function readStdinUtf8(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const c of process.stdin) {
@@ -57,17 +52,16 @@ async function readStdinUtf8(): Promise<string> {
 
 async function apiFetch(cmd: Command, method: string, apiPath: string, body?: unknown): Promise<Response> {
   const opts = rootOpts(cmd);
-  const base = (opts.apiUrl ?? process.env.OPENDESKTOP_API_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
-  const token = await readTokenFromOpts(cmd);
-  const url = `${base}${apiPath}`;
-  return fetch(url, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  try {
+    const ctx = await buildCliHttpContext({ apiUrl: opts.apiUrl, tokenFile: opts.tokenFile });
+    return await fetchWithBearer(ctx, method, apiPath, body);
+  } catch (e) {
+    if (e instanceof CoreUnreachableError) {
+      printCoreUnreachableHelp(e.baseUrl);
+      process.exit(exitCodeForFetchError(e));
+    }
+    throw e;
+  }
 }
 
 function openBrowser(url: string): void {
