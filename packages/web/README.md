@@ -1,6 +1,6 @@
 # @opendesktop/web
 
-OpenDesktop 控制台前端（Vite + React）。
+OpenDesktop 控制台前端（Vite + React）。仓库总览、启动 Core、token 与文档导航见根目录 [README.md](../../README.md)。
 
 ## Network 视图与第三方 UI 参考
 
