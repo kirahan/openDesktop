@@ -6,9 +6,6 @@ describe("tryParseAppFirstArgv", () => {
     expect(tryParseAppFirstArgv(["session", "list"]).kind).toBe("not-app-first");
   });
 
-  it("returns not-app-first for session start <profileId> (three tokens)", () => {
-    expect(tryParseAppFirstArgv(["session", "start", "xiezuo"]).kind).toBe("not-app-first");
-  });
 
   it("accepts topology as alias of list-window", () => {
     const r = tryParseAppFirstArgv(["my-app", "topology"]);

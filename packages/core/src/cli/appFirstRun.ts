@@ -165,7 +165,7 @@ async function resolveSessionId(
     const knownAppIds = [...new Set(profiles.map((p) => p.appId))].sort();
     const hint =
       knownAppIds.length > 0
-        ? `Core 已注册的 appId：${knownAppIds.join(", ")}。第一个参数须与注册的应用 id 完全一致（开发脚本名如 xiezuo-dev 未必等于 app id）。可用 yarn oc app list 查看。`
+        ? `Core 已注册的 appId：${knownAppIds.join(", ")}。第一个参数须与注册的应用 id 完全一致。可用 yarn oc app list 查看。`
         : "当前无任何 Profile；请先 yarn oc app create 注册应用，再用 yarn oc session start <profileId> 新建会话。";
     return {
       ok: false,

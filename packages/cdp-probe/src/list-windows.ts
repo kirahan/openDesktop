@@ -96,7 +96,7 @@ function main() {
     try {
       targets = await listViaJsonList(origin);
     } catch (e) {
-      console.error("拉取 /json/list 失败（请确认 xiezuo 已开且端口正确）:", e);
+      console.error("拉取 /json/list 失败（请确认 已开且端口正确）:", e);
       process.exit(1);
     }
 
