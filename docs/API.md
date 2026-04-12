@@ -51,6 +51,13 @@
 | `GET /v1/sessions/:id/network/stream?targetId=<id>`           | **SSE**：请求完成元数据 JSON（无 body）。可选 `stripQuery`、`maxEventsPerSecond`。                                 |
 | `GET /v1/sessions/:id/proxy/stream`                           | **SSE**：本地转发代理观测（`proxyRequestComplete`）。专用代理未启用时 **503**。                                         |
 | `GET /v1/sessions/:id/runtime-exception/stream?targetId=<id>` | **SSE**：`Runtime.exceptionThrown`。须 `allowScriptExecution: true`。                                  |
+| `POST /v1/sessions/:id/replay/recording/start`                 | **JSON** Body：`{ "targetId": "<page targetId>" }`。对单 page 开启矢量录制（CDP 注入 + `Runtime.addBinding`）。须 `running` 且 `allowScriptExecution: true`。 |
+| `POST /v1/sessions/:id/replay/recording/stop`                  | **JSON** Body：`{ "targetId": "<page targetId>" }`。停止录制并释放注入。无活跃录制时 **409** `RECORDER_NOT_ACTIVE`。 |
+| `GET /v1/sessions/:id/replay/stream?targetId=<id>`             | **SSE**：推送录制事件 JSON（`data:` 行）。须**先** `replay/recording/start` 且会话仍 `running`，否则 **503** `RECORDER_NOT_ACTIVE`。并发连接上限与 **429** `REPLAY_SSE_STREAM_LIMIT` 见实现。 |
+| `POST /v1/sessions/:id/rrweb/recording/start`                  | **JSON** Body：`{ "targetId": "<page targetId>" }`。对单 page 注入构建产物 `inject.bundle.js`（IIFE）并 `Runtime.addBinding`（binding 名 `odOpenDesktopRrweb`）。须 `running` 且 `allowScriptExecution: true`。未构建注入包时 **503** `RRWEB_BUNDLE_NOT_FOUND`。 |
+| `POST /v1/sessions/:id/targets/:targetId/rrweb/inject`         | 与上一行等价，`targetId` 取自路径。 |
+| `POST /v1/sessions/:id/rrweb/recording/stop`                   | **JSON** Body：`{ "targetId": "<page targetId>" }`。停止 rrweb 录制并移除 binding。无活跃录制时 **409** `RRWEB_RECORDER_NOT_ACTIVE`。 |
+| `GET /v1/sessions/:id/rrweb/stream?targetId=<id>`            | **SSE**：`data:` 行为 rrweb 事件 JSON（`type` 为数字）。须**先** `rrweb/recording/start` 或 `.../rrweb/inject`，否则 **503** `RRWEB_RECORDER_NOT_ACTIVE`。并发连接上限与 **429** `RRWEB_SSE_STREAM_LIMIT` 见实现；`event: ready` 中带 `rrwebBundleVersion`（与 Core 常量 `RRWEB_INJECT_BUNDLE_VERSION` 一致，当前与 npm `rrweb` **1.1.3** 对齐）。**说明**：注入后录制会立即产生 Meta(4) 与 FullSnapshot(2)，若晚于该时刻才连 SSE，旧实现会丢失基线；Core 会**缓冲**近期事件行并在新连接上**先重放缓冲**再推送增量（缓冲有上限，极长会话仍以当时缓冲为准）。 |
 | `GET /v1/sessions/:id/logs/export?format=jsonl&level=error`   | 日志导出                                                                                               |
 | `GET /v1/agent/sessions/:id/snapshot`                         | OODA 结构化快照                                                                                         |
 | `POST /v1/agent/sessions/:id/actions`                         | Agent 动词，见下表                                                                                       |
@@ -66,9 +73,25 @@ curl -N -H "Authorization: Bearer $TOKEN" \
   "http://127.0.0.1:8787/v1/sessions/$SESSION/network/stream?targetId=$TARGET"
 ```
 
-`GET /v1/version` 的 `capabilities`、`sseObservabilityStreams` / `sseObservabilityStreamPaths` 可用于探测能力。
+`GET /v1/version` 的 `capabilities`、`sseObservabilityStreams` / `sseObservabilityStreamPaths` 可用于探测能力（含 `page_session_replay` / `pageReplay` 与 `session_replay_rrweb` / `rrweb` 路径）。
 
-**本地转发代理与目标应用**：已注册应用开启 **专用代理** 时，启动流程会注入 `HTTP_PROXY`/`HTTPS_PROXY`。若目标应用忽略环境变量，可能导致 `**proxy/stream` 无事件**。详见根目录 [README](../README.md) 与 [packages/web/README.md](../packages/web/README.md)「本地转发代理」。
+**矢量录制事件示例**（`schemaVersion` 为 1；坐标为视口 CSS 像素，附 `viewportWidth` / `viewportHeight`）：
+
+```json
+{
+  "schemaVersion": 1,
+  "type": "pointermove",
+  "ts": 1712812800000,
+  "x": 120.5,
+  "y": 64,
+  "viewportWidth": 1280,
+  "viewportHeight": 720
+}
+```
+
+**rrweb 与隐私默认值**：注入包内 `rrweb.record` 使用 **`maskAllInputs: true`**（输入类控件内容打码）；仍可能包含 URL、标题与 DOM 结构，请按合规要求使用。
+
+**本地转发代理与目标应用**：已注册应用开启 **专用代理** 时，启动流程会注入 `HTTP_PROXY`/`HTTPS_PROXY`。若目标应用忽略环境变量，可能导致 `proxy/stream` 无事件。详见根目录 [README](../README.md) 与 [packages/web/README.md](../packages/web/README.md)「本地转发代理」。
 
 **操作配方目录**：默认 `<数据目录>/recipes/`；环境变量 `OPENDESKTOP_RECIPES_DIR`。步骤与 DOM 探索兜底见主 README 历史说明与 `openspec/specs/cdp-operation-recipes`。
 

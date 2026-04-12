@@ -1,0 +1,16 @@
+{
+  "name": "@opendesktop/rrweb-inject-bundle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "test": "node --test src/injectBundle.test.mjs"
+  },
+  "dependencies": {
+    "rrweb": "1.1.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  }
+}

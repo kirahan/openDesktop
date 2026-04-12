@@ -5,8 +5,8 @@ export default defineConfig({
   plugins: [react()],
   base: "./",
   test: {
-    environment: "node",
-    include: ["src/**/*.test.ts"],
+    environment: "jsdom",
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
   },
   build: {
     outDir: "dist",

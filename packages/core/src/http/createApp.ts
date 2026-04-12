@@ -19,6 +19,30 @@ import {
   tryAcquireNetworkSseStream,
   tryAcquireRuntimeExceptionSseStream,
 } from "../cdp/observabilitySseLimiter.js";
+import {
+  releaseReplaySseStream,
+  tryAcquireReplaySseStream,
+} from "../session-replay/replaySseLimiter.js";
+import {
+  isPageRecordingActive,
+  POINTER_MOVE_MIN_INTERVAL_MS,
+  startPageRecording,
+  stopPageRecording,
+  subscribePageRecording,
+  sweepStalePageRecordings,
+} from "../session-replay/recordingService.js";
+import {
+  releaseRrwebSseStream,
+  tryAcquireRrwebSseStream,
+} from "../session-replay/rrwebSseLimiter.js";
+import { RRWEB_INJECT_BUNDLE_VERSION } from "../session-replay/rrwebPaths.js";
+import {
+  isRrwebRecordingActive,
+  startRrwebRecording,
+  stopRrwebRecording,
+  subscribeRrwebRecording,
+  sweepStaleRrwebRecordings,
+} from "../session-replay/rrwebRecordingService.js";
 import { NETWORK_SSE_MAX_EVENTS_PER_SECOND, runNetworkObservationStream } from "../cdp/networkObserveStream.js";
 import {
   MAX_RUNTIME_EXCEPTION_SSE_PER_MINUTE,
@@ -118,6 +142,8 @@ export function createApp(deps: AppDeps): CreateAppResult {
       "metrics",
       "logs_export",
       "live_console",
+      "page_session_replay",
+      "session_replay_rrweb",
       ...(config.enableAgentApi ? (["agent", "snapshot"] as const) : []),
       ...(config.enableExtendedLogFields ? (["extended_logs"] as const) : []),
     ];
@@ -126,11 +152,13 @@ export function createApp(deps: AppDeps): CreateAppResult {
       api: API_VERSION,
       core: PACKAGE_VERSION,
       capabilities,
-      sseObservabilityStreams: ["network", "runtime-exception", "local-proxy"] as const,
+      sseObservabilityStreams: ["network", "runtime-exception", "local-proxy", "page-replay", "rrweb"] as const,
       sseObservabilityStreamPaths: {
         network: "/v1/sessions/:sessionId/network/stream",
         runtimeException: "/v1/sessions/:sessionId/runtime-exception/stream",
         localProxy: "/v1/sessions/:sessionId/proxy/stream",
+        pageReplay: "/v1/sessions/:sessionId/replay/stream",
+        rrweb: "/v1/sessions/:sessionId/rrweb/stream",
       },
       ...(agentActions ? { agentActions: [...agentActions] } : {}),
     });
@@ -797,6 +825,276 @@ export function createApp(deps: AppDeps): CreateAppResult {
     } finally {
       req.removeListener("close", onClose);
       releaseConsoleStream();
+    }
+  });
+
+  v1.post("/sessions/:sessionId/replay/recording/start", async (req, res) => {
+    const body = req.body as { targetId?: string };
+    const targetId = typeof body?.targetId === "string" ? body.targetId.trim() : "";
+    if (!targetId) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "targetId required");
+    }
+    const sessionId = req.params.sessionId;
+    sweepStalePageRecordings(manager);
+    const result = await startPageRecording(manager, sessionId, targetId);
+    if ("error" in result) {
+      const code = result.code;
+      const status =
+        code === "SESSION_NOT_FOUND"
+          ? 404
+          : code === "SCRIPT_NOT_ALLOWED"
+            ? 403
+            : code === "CDP_NOT_READY" || code === "INJECT_FAILED"
+              ? 503
+              : 500;
+      return jsonError(res, status, code, result.error);
+    }
+    res.json({ ok: true, sessionId, targetId });
+  });
+
+  v1.post("/sessions/:sessionId/replay/recording/stop", async (req, res) => {
+    const body = req.body as { targetId?: string };
+    const targetId = typeof body?.targetId === "string" ? body.targetId.trim() : "";
+    if (!targetId) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "targetId required");
+    }
+    const sessionId = req.params.sessionId;
+    sweepStalePageRecordings(manager);
+    const result = await stopPageRecording(manager, sessionId, targetId);
+    if ("error" in result) {
+      const code = result.code;
+      const status =
+        code === "SESSION_NOT_FOUND"
+          ? 404
+          : code === "RECORDER_NOT_ACTIVE"
+            ? 409
+            : 500;
+      return jsonError(res, status, code, result.error);
+    }
+    res.json({ ok: true, sessionId, targetId });
+  });
+
+  v1.get("/sessions/:sessionId/replay/stream", async (req, res) => {
+    const q = req.query.targetId;
+    const targetId = typeof q === "string" ? q.trim() : "";
+    if (!targetId) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "targetId query parameter required");
+    }
+    const sessionId = req.params.sessionId;
+    sweepStalePageRecordings(manager);
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (ctx.state !== "running" || !ctx.cdpPort) {
+      return jsonError(res, 503, "CDP_NOT_READY", "Session has no active CDP endpoint");
+    }
+    if (!ctx.allowScriptExecution) {
+      return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+    }
+    if (!isPageRecordingActive(sessionId, targetId)) {
+      return jsonError(
+        res,
+        503,
+        "RECORDER_NOT_ACTIVE",
+        "Start recording first: POST /v1/sessions/.../replay/recording/start with targetId",
+      );
+    }
+    if (!tryAcquireReplaySseStream()) {
+      return jsonError(
+        res,
+        429,
+        "REPLAY_SSE_STREAM_LIMIT",
+        "Too many concurrent page replay streams",
+      );
+    }
+
+    const ac = new AbortController();
+    const onClose = (): void => {
+      ac.abort();
+    };
+    req.on("close", onClose);
+
+    try {
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+
+      const readyPayload = {
+        sessionId,
+        targetId,
+        pointerMoveThrottleMsCore: POINTER_MOVE_MIN_INTERVAL_MS,
+        note: "events are JSON in data frames; pointermove is throttled in page and again in Core",
+      };
+      res.write(`event: ready\ndata: ${JSON.stringify(readyPayload)}\n\n`);
+
+      const unsub = subscribePageRecording(sessionId, targetId, (line) => {
+        if (res.writableEnded) return;
+        res.write(`data: ${line}\n\n`);
+      });
+      if (!unsub) {
+        if (!res.writableEnded) {
+          res.write(`event: error\ndata: ${JSON.stringify({ message: "RECORDER_NOT_ACTIVE" })}\n\n`);
+          res.end();
+        }
+        return;
+      }
+
+      await new Promise<void>((resolve) => {
+        if (ac.signal.aborted) {
+          resolve();
+          return;
+        }
+        ac.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      unsub();
+      if (!res.writableEnded) res.end();
+    } finally {
+      req.removeListener("close", onClose);
+      releaseReplaySseStream();
+    }
+  });
+
+  v1.post("/sessions/:sessionId/rrweb/recording/start", async (req, res) => {
+    const body = req.body as { targetId?: string };
+    const targetId = typeof body?.targetId === "string" ? body.targetId.trim() : "";
+    if (!targetId) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "targetId required");
+    }
+    const sessionId = req.params.sessionId;
+    sweepStaleRrwebRecordings(manager);
+    const result = await startRrwebRecording(manager, sessionId, targetId);
+    if ("error" in result) {
+      const code = result.code;
+      const status =
+        code === "SESSION_NOT_FOUND"
+          ? 404
+          : code === "SCRIPT_NOT_ALLOWED"
+            ? 403
+            : code === "RRWEB_BUNDLE_NOT_FOUND" || code === "CDP_NOT_READY" || code === "INJECT_FAILED"
+              ? 503
+              : 500;
+      return jsonError(res, status, code, result.error);
+    }
+    res.json({ ok: true, sessionId, targetId, rrwebBundleVersion: RRWEB_INJECT_BUNDLE_VERSION });
+  });
+
+  v1.post("/sessions/:sessionId/targets/:targetId/rrweb/inject", async (req, res) => {
+    const targetId = typeof req.params.targetId === "string" ? req.params.targetId.trim() : "";
+    if (!targetId) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "targetId required");
+    }
+    const sessionId = req.params.sessionId;
+    sweepStaleRrwebRecordings(manager);
+    const result = await startRrwebRecording(manager, sessionId, targetId);
+    if ("error" in result) {
+      const code = result.code;
+      const status =
+        code === "SESSION_NOT_FOUND"
+          ? 404
+          : code === "SCRIPT_NOT_ALLOWED"
+            ? 403
+            : code === "RRWEB_BUNDLE_NOT_FOUND" || code === "CDP_NOT_READY" || code === "INJECT_FAILED"
+              ? 503
+              : 500;
+      return jsonError(res, status, code, result.error);
+    }
+    res.json({ ok: true, sessionId, targetId, rrwebBundleVersion: RRWEB_INJECT_BUNDLE_VERSION });
+  });
+
+  v1.post("/sessions/:sessionId/rrweb/recording/stop", async (req, res) => {
+    const body = req.body as { targetId?: string };
+    const targetId = typeof body?.targetId === "string" ? body.targetId.trim() : "";
+    if (!targetId) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "targetId required");
+    }
+    const sessionId = req.params.sessionId;
+    sweepStaleRrwebRecordings(manager);
+    const result = await stopRrwebRecording(manager, sessionId, targetId);
+    if ("error" in result) {
+      const code = result.code;
+      const status =
+        code === "SESSION_NOT_FOUND"
+          ? 404
+          : code === "RRWEB_RECORDER_NOT_ACTIVE"
+            ? 409
+            : 500;
+      return jsonError(res, status, code, result.error);
+    }
+    res.json({ ok: true, sessionId, targetId });
+  });
+
+  v1.get("/sessions/:sessionId/rrweb/stream", async (req, res) => {
+    const q = req.query.targetId;
+    const targetId = typeof q === "string" ? q.trim() : "";
+    if (!targetId) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "targetId query parameter required");
+    }
+    const sessionId = req.params.sessionId;
+    sweepStaleRrwebRecordings(manager);
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (ctx.state !== "running" || !ctx.cdpPort) {
+      return jsonError(res, 503, "CDP_NOT_READY", "Session has no active CDP endpoint");
+    }
+    if (!ctx.allowScriptExecution) {
+      return jsonError(res, 403, "SCRIPT_NOT_ALLOWED", "allowScriptExecution is false for this session");
+    }
+    if (!isRrwebRecordingActive(sessionId, targetId)) {
+      return jsonError(
+        res,
+        503,
+        "RRWEB_RECORDER_NOT_ACTIVE",
+        "Start rrweb first: POST /v1/sessions/.../rrweb/recording/start or .../targets/:id/rrweb/inject",
+      );
+    }
+    if (!tryAcquireRrwebSseStream()) {
+      return jsonError(res, 429, "RRWEB_SSE_STREAM_LIMIT", "Too many concurrent rrweb streams");
+    }
+
+    const ac = new AbortController();
+    const onClose = (): void => {
+      ac.abort();
+    };
+    req.on("close", onClose);
+
+    try {
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+
+      const readyPayload = {
+        sessionId,
+        targetId,
+        rrwebBundleVersion: RRWEB_INJECT_BUNDLE_VERSION,
+        note: "data frames are rrweb JSON events (type is numeric); see rrweb EventType",
+      };
+      res.write(`event: ready\ndata: ${JSON.stringify(readyPayload)}\n\n`);
+
+      const unsub = subscribeRrwebRecording(sessionId, targetId, (line) => {
+        if (res.writableEnded) return;
+        res.write(`data: ${line}\n\n`);
+      });
+      if (!unsub) {
+        if (!res.writableEnded) {
+          res.write(`event: error\ndata: ${JSON.stringify({ message: "RRWEB_RECORDER_NOT_ACTIVE" })}\n\n`);
+          res.end();
+        }
+        return;
+      }
+
+      await new Promise<void>((resolve) => {
+        if (ac.signal.aborted) {
+          resolve();
+          return;
+        }
+        ac.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      unsub();
+      if (!res.writableEnded) res.end();
+    } finally {
+      req.removeListener("close", onClose);
+      releaseRrwebSseStream();
     }
   });
 

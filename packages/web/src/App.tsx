@@ -1,4 +1,12 @@
-import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { NetworkView } from "./network/NetworkView.js";
 import { proxyRequestCompleteToRow, requestCompleteToRow } from "./network/sseToRow.js";
 import type { NetworkRequestRow } from "./network/types.js";
@@ -8,6 +16,13 @@ import {
   parseAppIdsFromListJson,
   suggestedAppIdFromExecutablePath,
 } from "./appIdSuggest.js";
+import { mapReplayCoordsToOverlay } from "./replay/replayOverlayMath.js";
+import {
+  filterNonStructureReplayLines,
+  StructureSnapshotTreePanel,
+} from "./replay/structureSnapshotTree.js";
+import { RrwebReplayView } from "./replay/RrwebReplayView.js";
+import { RrwebStreamDiagnostics } from "./replay/rrwebDiagnosticsPanel.js";
 
 type DetailKind = "list-window" | "metrics" | "snapshot";
 
@@ -564,7 +579,27 @@ function pageInspectorBtnStyle(loading: boolean): React.CSSProperties {
 }
 
 /** 右侧抽屉内 SSE 类型：与 Core `GET .../console|network|runtime-exception|proxy/stream` 及 `logs/stream` 对齐 */
-type ObservabilityStreamKind = "console" | "network" | "exception" | "proxy" | "mainlog";
+type ObservabilityStreamKind =
+  | "console"
+  | "network"
+  | "exception"
+  | "proxy"
+  | "mainlog"
+  | "replay"
+  | "rrweb";
+
+/** rrweb 事件条数上限，避免长会话撑爆内存 */
+const MAX_RRWEB_EVENTS = 6000;
+
+/** 矢量录制 overlay 标记（视口 CSS 坐标 + 视口宽高，用于缩放映射） */
+type ReplayOverlayMark = {
+  kind: "move" | "click";
+  x: number;
+  y: number;
+  vw: number;
+  vh: number;
+  ts: number;
+};
 
 /** 本地代理流 tab 用的占位 targetId（非 CDP target） */
 const SESSION_PROXY_TARGET_ID = "__session_proxy__";
@@ -584,6 +619,10 @@ function observabilityStreamKindLabel(k: ObservabilityStreamKind): string {
       return "主进程代理";
     case "mainlog":
       return "主进程日志";
+    case "replay":
+      return "矢量录制";
+    case "rrweb":
+      return "rrweb 回放";
     default:
       return k;
   }
@@ -602,6 +641,10 @@ function observabilityStartButtonLabel(kind: ObservabilityStreamKind, running: b
       return "开始主进程代理流";
     case "mainlog":
       return "开始主进程日志流";
+    case "replay":
+      return "开始矢量录制流";
+    case "rrweb":
+      return "开始 rrweb 流";
     default:
       return "开始";
   }
@@ -619,6 +662,10 @@ function observabilityStreamHint(kind: ObservabilityStreamKind): string {
       return "SSE · 本地转发代理 · HTTP 明文 + HTTPS CONNECT（不解密）· 须应用开启专用代理";
     case "mainlog":
       return "SSE · Core 拉起的子进程 stdout/stderr（连接前先推送已有缓冲）· 与渲染进程 DevTools 控制台不是同一路";
+    case "replay":
+      return "须先 POST 开启录制；清屏仅清空本标签视图，不自动停止服务端录制（点停止会结束订阅并请求 stop）";
+    case "rrweb":
+      return "须先 POST 开启 rrweb 录制（或「注入录制包」）；SSE data 帧为 rrweb JSON（type 为数字）；清屏清空本标签累积事件；停止会结束订阅并请求 rrweb stop";
     default:
       return "";
   }
@@ -648,6 +695,12 @@ function buildObservabilitySseUrl(
     case "mainlog":
       path = `/v1/sessions/${sessionId}/logs/stream`;
       break;
+    case "replay":
+      path = `/v1/sessions/${sessionId}/replay/stream?targetId=${enc}`;
+      break;
+    case "rrweb":
+      path = `/v1/sessions/${sessionId}/rrweb/stream?targetId=${enc}`;
+      break;
   }
   return apiRoot ? `${apiRoot.replace(/\/$/, "")}${path}` : path;
 }
@@ -662,9 +715,67 @@ type LiveConsoleTabState = {
   lines: string[];
   /** `streamKind === "network" | "proxy"` 时：SSE 累积表格行 */
   networkRows?: NetworkRequestRow[];
+  /** `streamKind === "replay"`：overlay 用采样点 */
+  replayOverlay?: ReplayOverlayMark[];
+  /** `streamKind === "rrweb"`：Replayer 用事件列表 */
+  rrwebEvents?: unknown[];
   running: boolean;
   err: string | null;
 };
+
+/**
+ * rrweb SSE 事件频率很高（尤其 MouseMove），若每条都 setTabs 会拖垮主线程与 Replayer。
+ * 合并为每帧最多一次更新，显著降低卡顿。
+ */
+function createRrwebEventBatchSink(
+  tabId: string,
+  ac: AbortController,
+  setTabs: React.Dispatch<React.SetStateAction<LiveConsoleTabState[]>>,
+): {
+  push: (obj: Record<string, unknown>) => void;
+  flushSync: () => void;
+} {
+  const pending: Record<string, unknown>[] = [];
+  let rafId: number | null = null;
+
+  const flush = (): void => {
+    rafId = null;
+    if (ac.signal.aborted) {
+      pending.length = 0;
+      return;
+    }
+    if (pending.length === 0) return;
+    const batch = pending.splice(0, pending.length);
+    setTabs((prev) =>
+      prev.map((t) => {
+        if (t.id !== tabId || t.streamKind !== "rrweb") return t;
+        const prevEv = t.rrwebEvents ?? [];
+        const nextEv = [...prevEv, ...batch];
+        return {
+          ...t,
+          rrwebEvents:
+            nextEv.length > MAX_RRWEB_EVENTS ? nextEv.slice(-MAX_RRWEB_EVENTS) : nextEv,
+        };
+      }),
+    );
+  };
+
+  return {
+    push(obj: Record<string, unknown>): void {
+      pending.push(obj);
+      if (rafId == null) {
+        rafId = requestAnimationFrame(flush);
+      }
+    },
+    flushSync(): void {
+      if (rafId != null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      flush();
+    },
+  };
+}
 
 type OpenLiveTabParams = {
   sessionId: string;
@@ -681,6 +792,111 @@ const LiveConsoleDockContext = React.createContext<{
 
 function useLiveConsoleDock(): { openLiveTab: (p: OpenLiveTabParams) => void } | null {
   return useContext(LiveConsoleDockContext);
+}
+
+function VectorReplayPreview({ lines, marks }: { lines: string[]; marks: ReplayOverlayMark[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 320, h: 200 });
+  const logLinesWithoutStructure = useMemo(() => filterNonStructureReplayLines(lines), [lines]);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      setSize({ w: el.clientWidth, h: el.clientHeight });
+    });
+    ro.observe(el);
+    setSize({ w: el.clientWidth, h: el.clientHeight });
+    return () => ro.disconnect();
+  }, []);
+
+  const lastMove = [...marks].reverse().find((m) => m.kind === "move");
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 200 }}>
+      <div
+        ref={ref}
+        style={{
+          position: "relative",
+          flex: 1,
+          minHeight: 160,
+          background: "#0f172a",
+          borderRadius: 6,
+          overflow: "hidden",
+        }}
+      >
+        {lastMove && lastMove.vw > 0 && lastMove.vh > 0 ? (
+          (() => {
+            const p = mapReplayCoordsToOverlay(lastMove.x, lastMove.y, lastMove.vw, lastMove.vh, size.w, size.h);
+            return (
+              <div
+                title="pointermove（视口坐标映射到本预览框）"
+                style={{
+                  position: "absolute",
+                  borderRadius: 999,
+                  width: 12,
+                  height: 12,
+                  marginLeft: -6,
+                  marginTop: -6,
+                  background: "rgba(96, 165, 250, 0.95)",
+                  left: p.leftPx,
+                  top: p.topPx,
+                  pointerEvents: "none",
+                }}
+              />
+            );
+          })()
+        ) : null}
+        {marks
+          .filter((m) => m.kind === "click")
+          .slice(-12)
+          .map((m, i) => {
+            const p = mapReplayCoordsToOverlay(m.x, m.y, m.vw, m.vh, size.w, size.h);
+            return (
+              <div
+                key={`${m.ts}-${i}`}
+                title="click"
+                style={{
+                  position: "absolute",
+                  left: p.leftPx,
+                  top: p.topPx,
+                  width: 18,
+                  height: 18,
+                  marginLeft: -9,
+                  marginTop: -9,
+                  borderRadius: 999,
+                  border: "2px solid #fbbf24",
+                  background: "rgba(251, 191, 36, 0.22)",
+                  pointerEvents: "none",
+                }}
+              />
+            );
+          })}
+      </div>
+      <StructureSnapshotTreePanel lines={lines} />
+      {logLinesWithoutStructure.length > 0 && (
+        <pre
+          style={{
+            margin: 0,
+            flex: 1,
+            minHeight: 120,
+            maxHeight: "min(360px, 45vh)",
+            overflow: "auto",
+            padding: 8,
+            fontSize: 10,
+            lineHeight: 1.4,
+            background: "#0f172a",
+            color: "#e2e8f0",
+            borderRadius: 6,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          }}
+        >
+          {logLinesWithoutStructure.join("\n")}
+        </pre>
+      )}
+    </div>
+  );
 }
 
 /** 右侧实时观测抽屉：默认收起；多 tab，每 tab 对应 (session, target, 流类型) */
@@ -709,11 +925,50 @@ function LiveConsoleDockLayout({
     return () => window.removeEventListener("keydown", onKey);
   }, [drawerOpen]);
 
-  const stopStream = useCallback((tabId: string) => {
-    abortMap.current.get(tabId)?.abort();
-    abortMap.current.delete(tabId);
-    setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, running: false } : t)));
-  }, []);
+  const stopStream = useCallback(
+    (tabId: string) => {
+      const tab = tabsRef.current.find((x) => x.id === tabId);
+      if (tab?.streamKind === "replay") {
+        const base = apiRoot.replace(/\/$/, "");
+        const stopUrl = `${base}/v1/sessions/${tab.sessionId}/replay/recording/stop`;
+        const tok = token.trim();
+        if (tok) {
+          void fetch(stopUrl, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${tok}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ targetId: tab.targetId }),
+          }).then((res) => {
+            /* 无活跃录制时 Core 返回 409，视为幂等成功，避免控制台无意义告警 */
+            if (!res.ok && res.status !== 409) void res.text().catch(() => undefined);
+          }).catch(() => undefined);
+        }
+      }
+      if (tab?.streamKind === "rrweb") {
+        const base = apiRoot.replace(/\/$/, "");
+        const stopUrl = `${base}/v1/sessions/${tab.sessionId}/rrweb/recording/stop`;
+        const tok = token.trim();
+        if (tok) {
+          void fetch(stopUrl, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${tok}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ targetId: tab.targetId }),
+          }).then((res) => {
+            if (!res.ok && res.status !== 409) void res.text().catch(() => undefined);
+          }).catch(() => undefined);
+        }
+      }
+      abortMap.current.get(tabId)?.abort();
+      abortMap.current.delete(tabId);
+      setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, running: false } : t)));
+    },
+    [apiRoot, token],
+  );
 
   const clearTabLines = useCallback((tabId: string) => {
     setTabs((prev) =>
@@ -724,6 +979,8 @@ function LiveConsoleDockLayout({
               lines: [],
               networkRows:
                 t.streamKind === "network" || t.streamKind === "proxy" ? [] : t.networkRows,
+              replayOverlay: t.streamKind === "replay" ? [] : t.replayOverlay,
+              rrwebEvents: t.streamKind === "rrweb" ? [] : t.rrwebEvents,
             }
           : t,
       ),
@@ -732,8 +989,7 @@ function LiveConsoleDockLayout({
 
   const closeTab = useCallback(
     (tabId: string) => {
-      abortMap.current.get(tabId)?.abort();
-      abortMap.current.delete(tabId);
+      stopStream(tabId);
       setTabs((prev) => {
         const next = prev.filter((t) => t.id !== tabId);
         setActiveId((a) => {
@@ -743,7 +999,7 @@ function LiveConsoleDockLayout({
         return next;
       });
     },
-    [],
+    [stopStream],
   );
 
   const startStream = useCallback(
@@ -771,7 +1027,41 @@ function LiveConsoleDockLayout({
         );
       };
 
+      let rrwebBatchSink: ReturnType<typeof createRrwebEventBatchSink> | null = null;
+
       try {
+        if (streamKind === "rrweb") {
+          rrwebBatchSink = createRrwebEventBatchSink(tabId, ac, setTabs);
+        }
+        if (streamKind === "replay" || streamKind === "rrweb") {
+          const base = apiRoot.replace(/\/$/, "");
+          const startPath =
+            streamKind === "replay"
+              ? `/v1/sessions/${sessionId}/replay/recording/start`
+              : `/v1/sessions/${sessionId}/rrweb/recording/start`;
+          const startUrl = `${base}${startPath}`;
+          const startRes = await fetch(startUrl, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${tokenTrim}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ targetId }),
+            signal: ac.signal,
+          });
+          if (!startRes.ok) {
+            const tx = await startRes.text();
+            let msg = `HTTP ${startRes.status}`;
+            try {
+              const j = JSON.parse(tx) as { error?: { message?: string } };
+              msg = j.error?.message ?? msg;
+            } catch {
+              msg = tx.slice(0, 200);
+            }
+            throw new Error(msg);
+          }
+        }
+
         const res = await fetch(url, {
           headers: { Authorization: `Bearer ${tokenTrim}` },
           signal: ac.signal,
@@ -830,6 +1120,49 @@ function LiveConsoleDockLayout({
               continue;
             }
             try {
+              if (streamKind === "replay") {
+                let obj: Record<string, unknown>;
+                try {
+                  obj = JSON.parse(raw) as Record<string, unknown>;
+                } catch {
+                  pushLine(raw);
+                  continue;
+                }
+                pushLine(raw);
+                const typ = String(obj.type ?? "");
+                if (typ !== "pointermove" && typ !== "click" && typ !== "pointerdown") {
+                  continue;
+                }
+                const kind: ReplayOverlayMark["kind"] =
+                  typ === "click" || typ === "pointerdown" ? "click" : "move";
+                setTabs((prev) =>
+                  prev.map((t) => {
+                    if (t.id !== tabId || t.streamKind !== "replay") return t;
+                    const mark: ReplayOverlayMark = {
+                      kind,
+                      x: Number(obj.x ?? 0),
+                      y: Number(obj.y ?? 0),
+                      vw: Number(obj.viewportWidth ?? 1),
+                      vh: Number(obj.viewportHeight ?? 1),
+                      ts: Number(obj.ts ?? 0),
+                    };
+                    const prevO = t.replayOverlay ?? [];
+                    return { ...t, replayOverlay: [...prevO, mark].slice(-40) };
+                  }),
+                );
+                continue;
+              }
+              if (streamKind === "rrweb") {
+                let obj: Record<string, unknown>;
+                try {
+                  obj = JSON.parse(raw) as Record<string, unknown>;
+                } catch {
+                  continue;
+                }
+                if (typeof obj.type !== "number") continue;
+                rrwebBatchSink?.push(obj);
+                continue;
+              }
               if (streamKind === "mainlog") {
                 const row = JSON.parse(raw) as { ts?: string; stream?: string; line?: string };
                 const tag = row.stream === "stderr" ? "stderr" : "stdout";
@@ -913,6 +1246,7 @@ function LiveConsoleDockLayout({
           );
         }
       } finally {
+        rrwebBatchSink?.flushSync();
         abortMap.current.delete(tabId);
         setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, running: false } : t)));
       }
@@ -939,6 +1273,8 @@ function LiveConsoleDockLayout({
             label: tabLabel,
             lines: [],
             networkRows: streamKind === "network" || streamKind === "proxy" ? [] : undefined,
+            replayOverlay: streamKind === "replay" ? [] : undefined,
+            rrwebEvents: streamKind === "rrweb" ? [] : undefined,
             running: false,
             err: null,
           },
@@ -960,7 +1296,11 @@ function LiveConsoleDockLayout({
 
   const active = tabs.find((t) => t.id === activeId) ?? null;
   const tokenOk = token.trim().length > 0;
-  const drawerWide = active?.streamKind === "network" || active?.streamKind === "proxy";
+  const drawerWide =
+    active?.streamKind === "network" ||
+    active?.streamKind === "proxy" ||
+    active?.streamKind === "replay" ||
+    active?.streamKind === "rrweb";
 
   return (
     <LiveConsoleDockContext.Provider value={ctxValue}>
@@ -1066,7 +1406,7 @@ function LiveConsoleDockLayout({
             <div style={{ padding: 12, fontSize: 12, color: OBS_PALETTE.textMuted }}>填写 Bearer 后可用</div>
           ) : tabs.length === 0 ? (
             <div style={{ padding: 12, fontSize: 12, color: OBS_PALETTE.textMuted, lineHeight: 1.5 }}>
-              在「窗口 / 调试目标」卡片中打开「页面控制台 / 主进程日志 / HTTPS / 异常栈」，或点右下角「实时观测」，可新开标签；同一窗口可开多种流（多 tab）。
+              在「窗口 / 调试目标」卡片中打开「页面控制台 / 主进程日志 / HTTPS / 异常栈 / 矢量录制 / rrweb」，或点右下角「实时观测」，可新开标签；同一窗口可开多种流（多 tab）。
             </div>
           ) : (
             <>
@@ -1187,6 +1527,21 @@ function LiveConsoleDockLayout({
                         </pre>
                       )}
                     </>
+                  ) : active.streamKind === "replay" ? (
+                    <VectorReplayPreview lines={active.lines} marks={active.replayOverlay ?? []} />
+                  ) : active.streamKind === "rrweb" ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 200 }}>
+                      <RrwebStreamDiagnostics
+                        events={active.rrwebEvents ?? []}
+                        streamRunning={active.running}
+                      />
+                      {(active.rrwebEvents ?? []).length === 0 ? (
+                        <p style={{ margin: 0, fontSize: 11, color: OBS_PALETTE.textMuted }}>
+                          下方重放区在至少 2 条事件后才会绘制；请先根据「数据诊断」确认 SSE 是否在累积 Meta(4) 与 FullSnapshot(2)。
+                        </p>
+                      ) : null}
+                      <RrwebReplayView events={active.rrwebEvents ?? []} />
+                    </div>
                   ) : (
                     active.lines.length > 0 && (
                       <pre
@@ -1260,6 +1615,10 @@ function PageTargetScreenshot({
   const [exploreErr, setExploreErr] = useState<string | null>(null);
   const [exploreText, setExploreText] = useState<string | null>(null);
   const [interestPattern, setInterestPattern] = useState("");
+
+  const [rrwebInjectLoading, setRrwebInjectLoading] = useState(false);
+  const [rrwebInjectErr, setRrwebInjectErr] = useState<string | null>(null);
+  const [rrwebInjectOk, setRrwebInjectOk] = useState(false);
 
   const tokenOk = ctx.token.trim().length > 0;
   const liveDock = useLiveConsoleDock();
@@ -1403,6 +1762,42 @@ function PageTargetScreenshot({
     }
   }, [postAgent, tokenOk]);
 
+  const runRrwebInject = useCallback(async () => {
+    if (!tokenOk) return;
+    setRrwebInjectLoading(true);
+    setRrwebInjectErr(null);
+    setRrwebInjectOk(false);
+    try {
+      const base = ctx.apiRoot.replace(/\/$/, "");
+      const enc = encodeURIComponent(targetId);
+      const url = `${base}/v1/sessions/${ctx.sessionId}/targets/${enc}/rrweb/inject`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${ctx.token.trim()}`,
+          "Content-Type": "application/json",
+        },
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = JSON.parse(text) as { error?: { message?: string } };
+          msg = j.error?.message ?? msg;
+        } catch {
+          msg = text.slice(0, 200);
+        }
+        throw new Error(msg);
+      }
+      setRrwebInjectOk(true);
+      window.setTimeout(() => setRrwebInjectOk(false), 3200);
+    } catch (e) {
+      setRrwebInjectErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRrwebInjectLoading(false);
+    }
+  }, [tokenOk, ctx.apiRoot, ctx.sessionId, ctx.token, targetId]);
+
   if (!enabled) return null;
 
   if (!tokenOk) {
@@ -1532,7 +1927,7 @@ function PageTargetScreenshot({
             <p style={{ margin: "0 0 8px", fontSize: 10, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
               此处为 <strong>SSE 长连接</strong>。页面控制台流仅含<strong>连接后的</strong>新事件；主进程日志流含 Core
               已缓冲行并持续推送子进程 stdout/stderr。可分别打开<strong> 页面控制台 / 主进程日志 / HTTPS / 异常栈 /
-              代理 </strong>
+              矢量录制 / rrweb / 代理 </strong>
               等标签；HTTPS 限流时会出现 <code style={{ fontSize: 10 }}>[warning]</code>。
             </p>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
@@ -1600,6 +1995,45 @@ function PageTargetScreenshot({
                 onClick={() =>
                   liveDock.openLiveTab({
                     sessionId: ctx.sessionId,
+                    targetId,
+                    label: windowTitle,
+                    streamKind: "replay",
+                  })
+                }
+                style={pageInspectorBtnStyle(false)}
+                title="须 allowScriptExecution；先 POST 开启录制再订阅 SSE：.../replay/stream"
+              >
+                打开矢量录制
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  liveDock.openLiveTab({
+                    sessionId: ctx.sessionId,
+                    targetId,
+                    label: windowTitle,
+                    streamKind: "rrweb",
+                  })
+                }
+                style={pageInspectorBtnStyle(false)}
+                title="须 allowScriptExecution；先 POST 开启 rrweb 录制再订阅 SSE：.../rrweb/stream"
+              >
+                打开 rrweb 回放
+              </button>
+              <button
+                type="button"
+                disabled={!tokenOk || rrwebInjectLoading}
+                onClick={() => void runRrwebInject()}
+                style={pageInspectorBtnStyle(!tokenOk || rrwebInjectLoading)}
+                title="POST .../targets/:targetId/rrweb/inject，向页面注入 rrweb 录制脚本"
+              >
+                {rrwebInjectLoading ? "注入中…" : rrwebInjectOk ? "已请求注入" : "注入 rrweb 录制包"}
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  liveDock.openLiveTab({
+                    sessionId: ctx.sessionId,
                     targetId: SESSION_PROXY_TARGET_ID,
                     label: windowTitle,
                     streamKind: "proxy",
@@ -1611,6 +2045,11 @@ function PageTargetScreenshot({
                 打开主进程代理流
               </button>
             </div>
+            {rrwebInjectErr && (
+              <div style={{ marginTop: 8, fontSize: 11, color: "#991b1b", lineHeight: 1.4 }}>
+                rrweb 注入：{rrwebInjectErr}
+              </div>
+            )}
           </div>
         )}
         <p style={{ margin: "0 0 8px", fontSize: 11, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
