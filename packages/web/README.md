@@ -2,6 +2,13 @@
 
 OpenDesktop 控制台前端（Vite + React）。仓库总览、启动 Core、token 与文档导航见根目录 [README.md](../../README.md)。
 
+## 矢量录制与落盘（实时观测抽屉）
+
+- **协议与字段**：`replay/recording/start|stop`、`replay/stream`、可选 **`injectPageControls`**、**`assertion_checkpoint`** 等以 Core [`docs/API.md`](../../docs/API.md) 为准。
+- **页面内控制条**：开启「注入控制条」时，开始录制请求会带 **`injectPageControls: true`**，页面内可停止录制或打检查点；控制条上的指针事件不会进入矢量 NDJSON。
+- **落盘测试录制**：将当前 **矢量** 标签内已累积的行提交为 `test-recording-*.json`。缓冲区在同标签内 **多次开始/停止会追加** 行，需只分析本轮录制时可先 **清屏** 再录。
+- **按段多文件**：当 NDJSON 中存在成对的 **`segment_start`** 与 **`segment_end`** 时，控制台**仅将每个闭合区间**（含起止两行）分别 **POST** 一次 `test-recording-artifacts`（每次可带不同 **`recordingId`**）；段前与段后游离的采样行不会单独成文件。无分段标记时仍为单次落盘。详见 [`docs/API.md`](../../docs/API.md) 应用侧 JSON 说明。
+
 ## Network 视图与第三方 UI 参考
 
 **HTTPS / 主进程代理** 观测在 **实时观测抽屉** 中展示表格布局，**信息架构** 参考开源项目 **[Whistle](https://github.com/avwo/whistle)**（Copyright avwo，**MIT License**）。实现为自有 React 组件，非嵌入 Whistle 构建产物。

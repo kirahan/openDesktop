@@ -94,6 +94,8 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 
 `click` 事件可带可选字段 `target`，为点击目标节点的有限摘要（标签、`id`、`className`、若干 `data-*`、简化 `selector`、`role`），便于区分点了哪个元素；字段长度与条数在 Core 解析侧有上限。
 
+**人工分段标记**：流中可出现 `type` 为 **`segment_start`** 与 **`segment_end`** 的行（宜成对），用于圈定场景边界；语义与校验见实现侧 `session-replay/schema`。单次 **`POST .../test-recording-artifacts`** 的请求体仍只是**一份** `replayLines`；若要将同一缓冲区分成多份磁盘制品，由**客户端**多次调用该接口并为每次指定不同 **`recordingId`**（控制台在存在上述标记时的拆分策略见 `packages/web/README.md`）。
+
 **页面内控制条与第二条 binding**：仅在 `injectPageControls: true` 时启用。UI binding 载荷为 JSON 对象：`{"cmd":"stop"}` 停止矢量录制；`{"cmd":"checkpoint"}` 向 `replay/stream` 推送一行 **`assertion_checkpoint`**（可选 `note` 字符串，长度有上限），用于标记断言/检查点时刻，**不**替代页面真实交互产生的矢量事件。控制条交互不应进入矢量 NDJSON；若需自动化，请通过该 UI 通道而非篡改矢量 JSON。
 
 **assertion_checkpoint** 行示例：
@@ -133,7 +135,7 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 
 **操作配方目录**：默认 `<数据目录>/recipes/`；环境变量 `OPENDESKTOP_RECIPES_DIR`。步骤与 DOM 探索兜底见主 README 历史说明与 `openspec/specs/cdp-operation-recipes`。
 
-**应用侧 JSON 记录（测试录制等）**：默认根目录为 **`<数据目录>/app-json/`**，其下 **每个应用 id 一个子目录**，文件形如 `test-recording-<recordingId>.json`。可用环境变量 **`OPENDESKTOP_APP_JSON_DIR`** 将整个根目录指到其它绝对路径。制品可能含页面文本与 URL，默认视为本地调试数据，请勿在未脱敏时上传公网。规格见 `openspec/changes/test-recording-llm-capture/`。
+**应用侧 JSON 记录（测试录制等）**：默认根目录为 **`<数据目录>/app-json/`**，其下 **每个应用 id 一个子目录**，文件形如 `test-recording-<recordingId>.json`。可用环境变量 **`OPENDESKTOP_APP_JSON_DIR`** 将整个根目录指到其它绝对路径。制品可能含页面文本与 URL，默认视为本地调试数据，请勿在未脱敏时上传公网。规格见主文档 [`openspec/specs/test-recording-llm-capture/spec.md`](../openspec/specs/test-recording-llm-capture/spec.md)；页面矢量控制条能力见 [`openspec/specs/vector-replay-page-controls/spec.md`](../openspec/specs/vector-replay-page-controls/spec.md)。历史归档变更仍保留在 `openspec/changes/archive/` 下对应目录。
 
 ---
 
