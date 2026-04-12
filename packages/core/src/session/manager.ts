@@ -316,4 +316,21 @@ export class SessionManager {
       allowScriptExecution: s.allowScriptExecution ?? true,
     };
   }
+
+  /**
+   * Vitest：注入无子进程的 running 会话，仅用于 HTTP 路由单测。
+   */
+  testOnly_seedRunningSession(sessionId: string, profileId: string): void {
+    const internal: Internal = {
+      id: sessionId,
+      profileId,
+      state: "running",
+      createdAt: new Date().toISOString(),
+      cdpPort: 9222,
+      logs: [],
+      logSubscribers: new Set(),
+      allowScriptExecution: true,
+    };
+    this.sessions.set(sessionId, internal);
+  }
 }

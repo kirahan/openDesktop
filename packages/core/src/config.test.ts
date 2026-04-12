@@ -28,6 +28,19 @@ describe("loadConfig", () => {
     expect(c.recipesDir).toBe(path.resolve(path.join(root, "recipes")));
   });
 
+  it("defaults appJsonDir under dataDir", () => {
+    const root = path.resolve("/custom/data");
+    const c = loadConfig({ dataDir: "/custom/data" });
+    expect(c.appJsonDir).toBe(path.resolve(path.join(root, "app-json")));
+  });
+
+  it("uses OPENDESKTOP_APP_JSON_DIR when set", () => {
+    vi.stubEnv("OPENDESKTOP_APP_JSON_DIR", "/tmp/od-json-root");
+    const c = loadConfig({ dataDir: "/x" });
+    expect(c.appJsonDir).toBe(path.resolve("/tmp/od-json-root"));
+    vi.unstubAllEnvs();
+  });
+
   it("uses OPENDESKTOP_WEB_DIST for webDist when no override", () => {
     vi.stubEnv("OPENDESKTOP_WEB_DIST", "/tmp/od-web");
     const c = loadConfig({ dataDir: "/x" });

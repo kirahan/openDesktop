@@ -60,6 +60,18 @@ import { collectScriptBodiesForApp } from "../userScripts/collectScriptBodiesFor
 import type { UserScriptRecord } from "../userScripts/types.js";
 import { pickWindowsExecutablePath } from "../dialog/pickWindowsExecutablePath.js";
 import { resolveWindowsShortcutFromPath } from "../shortcut/resolveWindowsShortcut.js";
+import {
+  parseTestRecordingArtifact,
+  type TestRecordingPageContext,
+} from "../test-recording/artifactSchema.js";
+import { validateAppId, validateRecordingId } from "../test-recording/appJsonPaths.js";
+import { buildTestRecordingArtifactFromReplayLines } from "../test-recording/buildArtifactFromReplayLines.js";
+import { resolveAppIdForSession } from "../test-recording/resolveSessionAppId.js";
+import {
+  listTestRecordingIds,
+  readTestRecordingArtifact,
+  writeTestRecordingArtifact,
+} from "../test-recording/writeArtifact.js";
 
 export interface AppDeps {
   config: CoreConfig;
@@ -872,6 +884,156 @@ export function createApp(deps: AppDeps): CreateAppResult {
       return jsonError(res, status, code, result.error);
     }
     res.json({ ok: true, sessionId, targetId });
+  });
+
+  v1.post("/sessions/:sessionId/test-recording-artifacts", async (req, res) => {
+    const sessionId = req.params.sessionId;
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (ctx.state !== "running") {
+      return jsonError(res, 503, "SESSION_NOT_ACTIVE", "Session is not running");
+    }
+
+    const appId = await resolveAppIdForSession(store, manager, sessionId);
+    if (!appId) {
+      return jsonError(res, 500, "APP_ID_RESOLVE_FAILED", "Could not resolve app for session");
+    }
+
+    const body = req.body as {
+      targetId?: string;
+      recordingId?: string;
+      replayLines?: string[];
+      notes?: string;
+      pageContext?: unknown;
+      artifact?: unknown;
+    };
+
+    const resolveRecordingId = (): string => {
+      const raw =
+        typeof body.recordingId === "string" && body.recordingId.trim().length > 0
+          ? body.recordingId.trim()
+          : randomUUID();
+      try {
+        validateRecordingId(raw);
+        return raw;
+      } catch {
+        throw new Error("INVALID_RECORDING_ID");
+      }
+    };
+
+    try {
+      if (body.artifact !== undefined && body.artifact !== null) {
+        const parsed = parseTestRecordingArtifact(body.artifact);
+        if (!parsed) {
+          return jsonError(res, 400, "VALIDATION_ERROR", "Invalid test recording artifact");
+        }
+        if (parsed.sessionId !== sessionId) {
+          return jsonError(res, 400, "VALIDATION_ERROR", "artifact.sessionId must match URL");
+        }
+        if (parsed.appId !== appId) {
+          return jsonError(res, 400, "VALIDATION_ERROR", "artifact.appId must match session profile");
+        }
+        let recordingId: string;
+        try {
+          recordingId = resolveRecordingId();
+        } catch {
+          return jsonError(res, 400, "VALIDATION_ERROR", "Invalid recordingId");
+        }
+        const { absolutePath } = await writeTestRecordingArtifact(
+          config.appJsonDir,
+          parsed.appId,
+          recordingId,
+          parsed,
+        );
+        return res.status(201).json({ ok: true, recordingId, path: absolutePath, artifact: parsed });
+      }
+
+      const targetId = typeof body.targetId === "string" ? body.targetId.trim() : "";
+      if (!targetId) {
+        return jsonError(res, 400, "VALIDATION_ERROR", "targetId required when artifact is omitted");
+      }
+      if (!Array.isArray(body.replayLines)) {
+        return jsonError(res, 400, "VALIDATION_ERROR", "replayLines array required when artifact is omitted");
+      }
+
+      let recordingId: string;
+      try {
+        recordingId = resolveRecordingId();
+      } catch {
+        return jsonError(res, 400, "VALIDATION_ERROR", "Invalid recordingId");
+      }
+
+      let pageContext: TestRecordingPageContext | undefined;
+      const pcRaw = body.pageContext;
+      if (pcRaw !== undefined && pcRaw !== null && typeof pcRaw === "object") {
+        const o = pcRaw as Record<string, unknown>;
+        if (typeof o.viewportWidth === "number" && typeof o.viewportHeight === "number") {
+          pageContext = {
+            viewportWidth: o.viewportWidth,
+            viewportHeight: o.viewportHeight,
+            ...(typeof o.pageUrl === "string" ? { pageUrl: o.pageUrl } : {}),
+            ...(typeof o.documentTitle === "string" ? { documentTitle: o.documentTitle } : {}),
+          };
+        }
+      }
+
+      const built = buildTestRecordingArtifactFromReplayLines({
+        replayLines: body.replayLines as string[],
+        appId,
+        sessionId,
+        targetId,
+        notes: typeof body.notes === "string" ? body.notes : undefined,
+        pageContext,
+      });
+
+      if (!built.ok) {
+        return jsonError(res, 400, "VALIDATION_ERROR", built.error);
+      }
+
+      const { absolutePath } = await writeTestRecordingArtifact(
+        config.appJsonDir,
+        appId,
+        recordingId,
+        built.artifact,
+      );
+      return res.status(201).json({ ok: true, recordingId, path: absolutePath, artifact: built.artifact });
+    } catch (e) {
+      if (e instanceof Error && e.message === "INVALID_RECORDING_ID") {
+        return jsonError(res, 400, "VALIDATION_ERROR", "Invalid recordingId");
+      }
+      throw e;
+    }
+  });
+
+  v1.get("/apps/:appId/test-recording-artifacts", async (req, res) => {
+    const appId = typeof req.params.appId === "string" ? req.params.appId.trim() : "";
+    try {
+      validateAppId(appId);
+    } catch {
+      return jsonError(res, 400, "VALIDATION_ERROR", "Invalid appId");
+    }
+    try {
+      const recordingIds = await listTestRecordingIds(config.appJsonDir, appId);
+      return res.json({ appId, recordingIds });
+    } catch (e) {
+      return jsonError(res, 500, "LIST_FAILED", e instanceof Error ? e.message : String(e));
+    }
+  });
+
+  v1.get("/apps/:appId/test-recording-artifacts/:recordingId", async (req, res) => {
+    const appId = typeof req.params.appId === "string" ? req.params.appId.trim() : "";
+    const recordingId = typeof req.params.recordingId === "string" ? req.params.recordingId.trim() : "";
+    try {
+      validateAppId(appId);
+      validateRecordingId(recordingId);
+    } catch {
+      return jsonError(res, 400, "VALIDATION_ERROR", "Invalid appId or recordingId");
+    }
+    const artifact = await readTestRecordingArtifact(config.appJsonDir, appId, recordingId);
+    if (!artifact) {
+      return jsonError(res, 404, "NOT_FOUND", "Test recording artifact not found");
+    }
+    return res.json(artifact);
   });
 
   v1.get("/sessions/:sessionId/replay/stream", async (req, res) => {

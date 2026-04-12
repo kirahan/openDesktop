@@ -41,7 +41,7 @@ yarn opd -- core start --port 8787
 
 首次运行会在数据目录生成 `token.txt`（默认 macOS：`~/Library/Application Support/OpenDesktop/token.txt`）。启动时终端会**直接打印 `Token: …`**，复制到 Web UI 的 Bearer 字段即可。**请妥善保管**：持有 token 即相当于持有本机 Control API 权限。
 
-**Web 静态目录**（可选）：解析顺序为 **`--web-dist` > `OPENDESKTOP_WEB_DIST` > 随包 `web-dist`**，详见 [docs/CLI.md](docs/CLI.md)。在 monorepo 里使用本仓库构建的 Web 时：
+**Web 静态目录**（可选）：解析顺序为 `**--web-dist` > `OPENDESKTOP_WEB_DIST` > 随包 `web-dist`**，详见 [docs/CLI.md](docs/CLI.md)。在 monorepo 里使用本仓库构建的 Web 时：
 
 ```bash
 yarn opd -- core start --web-dist "$(pwd)/packages/web/dist"
@@ -97,12 +97,12 @@ yarn oc app create --id my-app --exe "$(which node)" --cwd "$PWD" --args '[]' --
 ## 更多文档
 
 
-| 文档                                 | 内容                           |
-| ---------------------------------- | ---------------------------- |
-| [docs/CLI.md](docs/CLI.md)         | 命令树、App-first、`doctor`、退出码   |
-| [docs/API.md](docs/API.md)         | UserScript、HTTP 端点、Agent、SSE |
-| [docs/PRODUCT.md](docs/PRODUCT.md) | OpenSpec 能力总览（SHALL）         |
-| [docs/npm-publish.md](docs/npm-publish.md) | 维护者 npm 发布：测试、同步与 publish |
+| 文档                                         | 内容                           |
+| ------------------------------------------ | ---------------------------- |
+| [docs/CLI.md](docs/CLI.md)                 | 命令树、App-first、`doctor`、退出码   |
+| [docs/API.md](docs/API.md)                 | UserScript、HTTP 端点、Agent、SSE |
+| [docs/PRODUCT.md](docs/PRODUCT.md)         | OpenSpec 能力总览（SHALL）         |
+| [docs/npm-publish.md](docs/npm-publish.md) | 维护者 npm 发布：测试、同步与 publish    |
 
 
 ## CLI 快速示例

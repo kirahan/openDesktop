@@ -10,7 +10,7 @@
 
 ## npm 安装（发行版）
 
-若只需使用已发布的 CLI，可从 npm 全局安装 **`@hanzhao111/opendesktop`**（发布包源码位于本仓库 `packages/opendesktop`；因与已有包名过于相近，registry 要求使用 scoped 名称）：
+若只需使用已发布的 CLI，可从 npm 全局安装 `**@hanzhao111/opendesktop`**（发布包源码位于本仓库 `packages/opendesktop`；因与已有包名过于相近，registry 要求使用 scoped 名称）：
 
 ```bash
 npm install -g @hanzhao111/opendesktop
@@ -18,7 +18,7 @@ opd --help
 opd core start --port 8787
 ```
 
-全局命令为 **`opd`**（与源码目录里 `yarn opd` 一致）。**发行包**若随包带有 `web-dist`，`opd core start` 会**默认**托管 Web 控制台（无需再手写 `--web-dist`）；优先级与自定义方式见 **[docs/CLI.md](docs/CLI.md)**。**不发 npm 的本地验证**（pack、link、从目录安装）见 `packages/opendesktop/README.md`。
+全局命令为 `**opd**`（与源码目录里 `yarn opd` 一致）。**发行包**若随包带有 `web-dist`，`opd core start` 会**默认**托管 Web 控制台（无需再手写 `--web-dist`）；优先级与自定义方式见 **[docs/CLI.md](docs/CLI.md)**。**不发 npm 的本地验证**（pack、link、从目录安装）见 `packages/opendesktop/README.md`。
 
 参与本仓库开发或需要完整 monorepo 构建时，请使用下文「安装与构建」，勿与仅安装 CLI 的路径混淆。
 
@@ -41,7 +41,7 @@ yarn opd -- core start --port 8787
 
 首次运行会在数据目录生成 `token.txt`（默认 macOS：`~/Library/Application Support/OpenDesktop/token.txt`）。启动时终端会**直接打印 `Token: …`**，复制到 Web UI 的 Bearer 字段即可。**请妥善保管**：持有 token 即相当于持有本机 Control API 权限。
 
-**Web 静态目录**（可选）：CLI 会按 **`--web-dist` > `OPENDESKTOP_WEB_DIST` > 随包 `web-dist`** 解析；详见 [docs/CLI.md](docs/CLI.md)。在 monorepo 里用本仓库构建的 Web 时：
+**Web 静态目录**（可选）：CLI 会按 `**--web-dist` > `OPENDESKTOP_WEB_DIST` > 随包 `web-dist`** 解析；详见 [docs/CLI.md](docs/CLI.md)。在 monorepo 里用本仓库构建的 Web 时：
 
 ```bash
 yarn opd -- core start --web-dist "$(pwd)/packages/web/dist"
@@ -98,12 +98,14 @@ yarn oc app create --id my-app --exe "$(which node)" --cwd "$PWD" --args '[]' --
 
 ## 更多文档
 
-| 文档 | 内容 |
-|------|------|
-| [docs/CLI.md](docs/CLI.md) | 命令树、App-first、`doctor`、`--format`、退出码、环境变量 |
-| [docs/API.md](docs/API.md) | UserScript、Bearer 端点表、Agent 动词、SSE、Playwright CDP URL |
-| [docs/PRODUCT.md](docs/PRODUCT.md) | OpenSpec 能力总览（SHALL），与操作手册分工说明 |
+
+| 文档                                         | 内容                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------ |
+| [docs/CLI.md](docs/CLI.md)                 | 命令树、App-first、`doctor`、`--format`、退出码、环境变量                         |
+| [docs/API.md](docs/API.md)                 | UserScript、Bearer 端点表、Agent 动词、SSE、Playwright CDP URL              |
+| [docs/PRODUCT.md](docs/PRODUCT.md)         | OpenSpec 能力总览（SHALL），与操作手册分工说明                                     |
 | [docs/npm-publish.md](docs/npm-publish.md) | 维护者：`@hanzhao111/opendesktop` 发布前测试、`prepublish` 同步与 `npm publish` |
+
 
 ## CLI 快速示例
 
@@ -172,3 +174,4 @@ yarn docs:check-links
 
 - `packages/core`：守护进程、HTTP API、CDP 代理、CLI（`opd`）
 - `packages/web`：Vite + React 控制台（可选）；详见 [packages/web/README.md](packages/web/README.md)
+

@@ -16,11 +16,8 @@ import {
   parseAppIdsFromListJson,
   suggestedAppIdFromExecutablePath,
 } from "./appIdSuggest.js";
-import { mapReplayCoordsToOverlay } from "./replay/replayOverlayMath.js";
-import {
-  filterNonStructureReplayLines,
-  StructureSnapshotTreePanel,
-} from "./replay/structureSnapshotTree.js";
+import { mapReplayCoordsToObjectFitContain } from "./replay/replayOverlayMath.js";
+import { filterNonStructureReplayLines } from "./replay/structureSnapshotTree.js";
 import { RrwebReplayView } from "./replay/RrwebReplayView.js";
 import { RrwebStreamDiagnostics } from "./replay/rrwebDiagnosticsPanel.js";
 
@@ -164,18 +161,24 @@ function webSocketToDevtoolsInspectorUrl(wsUrl: string): string | null {
   }
 }
 
-async function copyToClipboard(text: string): Promise<void> {
+async function copyToClipboard(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
+    return true;
   } catch {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.left = "-9999px";
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand("copy");
-    document.body.removeChild(ta);
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -578,6 +581,31 @@ function pageInspectorBtnStyle(loading: boolean): React.CSSProperties {
   };
 }
 
+/** 仅保留可交给 Core `parseReplayEnvelope` 的 NDJSON 行（去掉 `[warning]` 等非事件 JSON）。 */
+function filterVectorLinesForTestRecordingArtifact(lines: string[]): string[] {
+  const out: string[] = [];
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t || t.startsWith("[warning]")) continue;
+    try {
+      const o = JSON.parse(line) as { schemaVersion?: unknown; type?: unknown };
+      if (o.schemaVersion !== 1) continue;
+      const typ = o.type;
+      if (
+        typ === "pointermove" ||
+        typ === "pointerdown" ||
+        typ === "click" ||
+        typ === "structure_snapshot"
+      ) {
+        out.push(line);
+      }
+    } catch {
+      /* skip */
+    }
+  }
+  return out;
+}
+
 /** 右侧抽屉内 SSE 类型：与 Core `GET .../console|network|runtime-exception|proxy/stream` 及 `logs/stream` 对齐 */
 type ObservabilityStreamKind =
   | "console"
@@ -663,7 +691,7 @@ function observabilityStreamHint(kind: ObservabilityStreamKind): string {
     case "mainlog":
       return "SSE · Core 拉起的子进程 stdout/stderr（连接前先推送已有缓冲）· 与渲染进程 DevTools 控制台不是同一路";
     case "replay":
-      return "须先 POST 开启录制；清屏仅清空本标签视图，不自动停止服务端录制（点停止会结束订阅并请求 stop）";
+      return "须先 POST 开启录制；清屏仅清空本标签视图，不自动停止服务端录制（点停止会结束订阅并请求 stop）。有数据后可点「落盘测试录制」写入 app-json。";
     case "rrweb":
       return "须先 POST 开启 rrweb 录制（或「注入录制包」）；SSE data 帧为 rrweb JSON（type 为数字）；清屏清空本标签累积事件；停止会结束订阅并请求 rrweb stop";
     default:
@@ -794,9 +822,28 @@ function useLiveConsoleDock(): { openLiveTab: (p: OpenLiveTabParams) => void } |
   return useContext(LiveConsoleDockContext);
 }
 
-function VectorReplayPreview({ lines, marks }: { lines: string[]; marks: ReplayOverlayMark[] }) {
+function VectorReplayPreview({
+  lines,
+  marks,
+  apiRoot,
+  sessionId,
+  targetId,
+  token,
+  screenshotWhileRunning,
+}: {
+  lines: string[];
+  marks: ReplayOverlayMark[];
+  apiRoot: string;
+  sessionId: string;
+  targetId: string;
+  token: string;
+  /** 为 true 时轮询窗口截图作为轻虚化背景（约 5s），不实时逐帧刷新 */
+  screenshotWhileRunning: boolean;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 320, h: 200 });
+  const [blurBgSrc, setBlurBgSrc] = useState<string | null>(null);
+  const [bddCopied, setBddCopied] = useState(false);
   const logLinesWithoutStructure = useMemo(() => filterNonStructureReplayLines(lines), [lines]);
   useLayoutEffect(() => {
     const el = ref.current;
@@ -809,24 +856,105 @@ function VectorReplayPreview({ lines, marks }: { lines: string[]; marks: ReplayO
     return () => ro.disconnect();
   }, []);
 
+  useEffect(() => {
+    if (!screenshotWhileRunning) {
+      setBlurBgSrc(null);
+      return;
+    }
+    const tok = token.trim();
+    if (!tok) {
+      setBlurBgSrc(null);
+      return;
+    }
+    const base = apiRoot.replace(/\/$/, "");
+    const path = `/v1/agent/sessions/${sessionId}/actions`;
+    const url = base ? `${base}${path}` : path;
+    let cancelled = false;
+    const fetchShot = async (): Promise<void> => {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tok}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ action: "screenshot", targetId }),
+        });
+        const text = await res.text();
+        if (cancelled) return;
+        if (!res.ok) return;
+        const j = JSON.parse(text) as Record<string, unknown>;
+        const data = j.data;
+        const mimeRaw = j.mime;
+        if (typeof data !== "string" || data.length === 0) return;
+        const mime =
+          typeof mimeRaw === "string" && /^image\/[a-z0-9.+-]+$/i.test(mimeRaw) ? mimeRaw : "image/png";
+        setBlurBgSrc(`data:${mime};base64,${data}`);
+      } catch {
+        if (!cancelled) setBlurBgSrc(null);
+      }
+    };
+    void fetchShot();
+    const id = window.setInterval(() => void fetchShot(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [screenshotWhileRunning, apiRoot, sessionId, targetId, token]);
+
+  const copyBddPrompt = useCallback(async () => {
+    const body = logLinesWithoutStructure.join("\n");
+    const truncated =
+      body.length > 20000 ? `${body.slice(0, 20000)}\n\n…（已截断，请配合完整落盘文件或自行拼接）` : body;
+    const prompt = `你是测试工程师。请根据下列矢量录制 JSON（每行一条 JSON，含 pointer、click 等事件）编写 Gherkin 风格的 BDD 自然语言测试用例文件。\n\n要求：\n- 输出一个完整的 Feature 文件内容（步骤描述可用中文）。\n- 包含 Feature、Scenario，以及 Given / When / Then（或团队约定的中文关键词）。\n- 步骤顺序应与录制中的用户操作顺序一致。\n- 不要编造录制中不存在的行为。\n\n--- 录制数据开始 ---\n${truncated}\n--- 录制数据结束 ---`;
+    const ok = await copyToClipboard(prompt);
+    if (ok) {
+      setBddCopied(true);
+      window.setTimeout(() => setBddCopied(false), 2000);
+    }
+  }, [logLinesWithoutStructure]);
+
   const lastMove = [...marks].reverse().find((m) => m.kind === "move");
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 200 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 }}>
       <div
         ref={ref}
         style={{
           position: "relative",
-          flex: 1,
-          minHeight: 160,
+          flex: "1 1 auto",
+          minHeight: "clamp(200px, 42vh, 78vh)",
           background: "#0f172a",
           borderRadius: 6,
           overflow: "hidden",
         }}
       >
+        {blurBgSrc ? (
+          <img
+            alt=""
+            src={blurBgSrc}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "contain",
+              filter: "blur(0.5px)",
+              pointerEvents: "none",
+              zIndex: 0,
+            }}
+          />
+        ) : null}
         {lastMove && lastMove.vw > 0 && lastMove.vh > 0 ? (
           (() => {
-            const p = mapReplayCoordsToOverlay(lastMove.x, lastMove.y, lastMove.vw, lastMove.vh, size.w, size.h);
+            const p = mapReplayCoordsToObjectFitContain(
+              lastMove.x,
+              lastMove.y,
+              lastMove.vw,
+              lastMove.vh,
+              size.w,
+              size.h,
+            );
             return (
               <div
                 title="pointermove（视口坐标映射到本预览框）"
@@ -841,6 +969,8 @@ function VectorReplayPreview({ lines, marks }: { lines: string[]; marks: ReplayO
                   left: p.leftPx,
                   top: p.topPx,
                   pointerEvents: "none",
+                  zIndex: 1,
+                  boxShadow: "0 0 0 2px rgba(15, 23, 42, 0.65), 0 0 14px rgba(96, 165, 250, 0.65)",
                 }}
               />
             );
@@ -850,7 +980,7 @@ function VectorReplayPreview({ lines, marks }: { lines: string[]; marks: ReplayO
           .filter((m) => m.kind === "click")
           .slice(-12)
           .map((m, i) => {
-            const p = mapReplayCoordsToOverlay(m.x, m.y, m.vw, m.vh, size.w, size.h);
+            const p = mapReplayCoordsToObjectFitContain(m.x, m.y, m.vw, m.vh, size.w, size.h);
             return (
               <div
                 key={`${m.ts}-${i}`}
@@ -867,19 +997,40 @@ function VectorReplayPreview({ lines, marks }: { lines: string[]; marks: ReplayO
                   border: "2px solid #fbbf24",
                   background: "rgba(251, 191, 36, 0.22)",
                   pointerEvents: "none",
+                  zIndex: 1,
                 }}
               />
             );
           })}
       </div>
-      <StructureSnapshotTreePanel lines={lines} />
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+        <button
+          type="button"
+          onClick={() => void copyBddPrompt()}
+          style={{
+            padding: "6px 10px",
+            fontSize: 11,
+            borderRadius: 6,
+            border: "1px solid #cbd5e1",
+            background: "#f8fafc",
+            cursor: "pointer",
+            color: "#0f172a",
+          }}
+        >
+          复制 BDD 生成提示词（含 JSON）
+        </button>
+        {bddCopied ? <span style={{ fontSize: 11, color: "#166534" }}>已复制到剪贴板</span> : null}
+        <span style={{ fontSize: 10, color: OBS_PALETTE.textMuted, lineHeight: 1.4 }}>
+          将提示词粘贴到大模型即可生成 Gherkin 风格用例；背景为当前窗口截图（轻度虚化），录制中约每 5 秒刷新
+        </span>
+      </div>
       {logLinesWithoutStructure.length > 0 && (
         <pre
           style={{
             margin: 0,
-            flex: 1,
-            minHeight: 120,
-            maxHeight: "min(360px, 45vh)",
+            flex: "0 1 auto",
+            minHeight: 0,
+            maxHeight: "min(280px, 32vh)",
             overflow: "auto",
             padding: 8,
             fontSize: 10,
@@ -915,6 +1066,13 @@ function LiveConsoleDockLayout({
   const abortMap = useRef<Map<string, AbortController>>(new Map());
   const tabsRef = useRef<LiveConsoleTabState[]>([]);
   tabsRef.current = tabs;
+
+  const [testRecPersistMsg, setTestRecPersistMsg] = useState<string | null>(null);
+  const [testRecPersistBusy, setTestRecPersistBusy] = useState(false);
+
+  useEffect(() => {
+    setTestRecPersistMsg(null);
+  }, [activeId]);
 
   useEffect(() => {
     if (!drawerOpen) return;
@@ -1292,6 +1450,59 @@ function LiveConsoleDockLayout({
     [startStream],
   );
 
+  const persistVectorTestRecording = useCallback(async () => {
+    const tab = tabsRef.current.find((x) => x.id === activeId);
+    if (!tab || tab.streamKind !== "replay") return;
+    const tokenTrim = token.trim();
+    if (!tokenTrim) return;
+    const replayLines = filterVectorLinesForTestRecordingArtifact(tab.lines);
+    if (replayLines.length === 0) {
+      setTestRecPersistMsg("✗ 没有可落盘的矢量 JSON 行，请先「开始矢量录制流」并产生数据");
+      return;
+    }
+    setTestRecPersistBusy(true);
+    setTestRecPersistMsg(null);
+    try {
+      const base = apiRoot.replace(/\/$/, "");
+      const url = `${base}/v1/sessions/${encodeURIComponent(tab.sessionId)}/test-recording-artifacts`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tokenTrim}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          targetId: tab.targetId,
+          replayLines,
+        }),
+      });
+      const tx = await res.text();
+      if (!res.ok) {
+        let msg = `HTTP ${String(res.status)}`;
+        try {
+          const j = JSON.parse(tx) as { error?: { message?: string; code?: string } };
+          msg = j.error?.message ?? j.error?.code ?? msg;
+        } catch {
+          msg = tx.slice(0, 280);
+        }
+        setTestRecPersistMsg(`✗ ${msg}`);
+        return;
+      }
+      try {
+        const j = JSON.parse(tx) as { path?: string; recordingId?: string };
+        setTestRecPersistMsg(
+          `✓ 已落盘 recordingId=${String(j.recordingId ?? "?")} · ${String(j.path ?? "")}`,
+        );
+      } catch {
+        setTestRecPersistMsg("✓ 已落盘");
+      }
+    } catch (e) {
+      setTestRecPersistMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setTestRecPersistBusy(false);
+    }
+  }, [activeId, apiRoot, token]);
+
   const ctxValue = useMemo(() => ({ openLiveTab }), [openLiveTab]);
 
   const active = tabs.find((t) => t.id === activeId) ?? null;
@@ -1409,7 +1620,15 @@ function LiveConsoleDockLayout({
               在「窗口 / 调试目标」卡片中打开「页面控制台 / 主进程日志 / HTTPS / 异常栈 / 矢量录制 / rrweb」，或点右下角「实时观测」，可新开标签；同一窗口可开多种流（多 tab）。
             </div>
           ) : (
-            <>
+            <div
+              style={{
+                flex: 1,
+                minHeight: 0,
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+              }}
+            >
               <div
                 style={{
                   display: "flex",
@@ -1420,6 +1639,7 @@ function LiveConsoleDockLayout({
                   background: "#fff",
                   maxHeight: 120,
                   overflowY: "auto",
+                  flexShrink: 0,
                 }}
               >
                 {tabs.map((t) => (
@@ -1472,7 +1692,17 @@ function LiveConsoleDockLayout({
                 ))}
               </div>
               {active && (
-                <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 8, minHeight: 200 }}>
+                <div
+                  style={{
+                    flex: 1,
+                    minHeight: 0,
+                    padding: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                    overflow: "auto",
+                  }}
+                >
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
                     <button
                       type="button"
@@ -1495,10 +1725,38 @@ function LiveConsoleDockLayout({
                     <button type="button" onClick={() => clearTabLines(active.id)} style={pageInspectorBtnStyle(false)}>
                       清屏
                     </button>
+                    {active.streamKind === "replay" ? (
+                      <button
+                        type="button"
+                        title="将本标签内累积的矢量 JSON 行 POST 为测试录制制品（须会话 running）"
+                        disabled={
+                          !tokenOk ||
+                          testRecPersistBusy ||
+                          filterVectorLinesForTestRecordingArtifact(active.lines).length === 0
+                        }
+                        onClick={() => void persistVectorTestRecording()}
+                        style={pageInspectorBtnStyle(testRecPersistBusy)}
+                      >
+                        {testRecPersistBusy ? "落盘中…" : "落盘测试录制"}
+                      </button>
+                    ) : null}
                   </div>
                   <p style={{ margin: 0, fontSize: 10, color: OBS_PALETTE.textMuted, lineHeight: 1.45 }}>
                     {observabilityStreamHint(active.streamKind)}
                   </p>
+                  {active.streamKind === "replay" && testRecPersistMsg ? (
+                    <p
+                      style={{
+                        margin: 0,
+                        fontSize: 10,
+                        lineHeight: 1.45,
+                        color: testRecPersistMsg.startsWith("✓") ? "#166534" : "#b91c1c",
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {testRecPersistMsg}
+                    </p>
+                  ) : null}
                   {active.err && (
                     <div style={{ fontSize: 11, color: "#991b1b", lineHeight: 1.4 }}>{active.err}</div>
                   )}
@@ -1528,7 +1786,15 @@ function LiveConsoleDockLayout({
                       )}
                     </>
                   ) : active.streamKind === "replay" ? (
-                    <VectorReplayPreview lines={active.lines} marks={active.replayOverlay ?? []} />
+                    <VectorReplayPreview
+                      lines={active.lines}
+                      marks={active.replayOverlay ?? []}
+                      apiRoot={apiRoot}
+                      sessionId={active.sessionId}
+                      targetId={active.targetId}
+                      token={token}
+                      screenshotWhileRunning={tokenOk && active.running}
+                    />
                   ) : active.streamKind === "rrweb" ? (
                     <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 200 }}>
                       <RrwebStreamDiagnostics
@@ -1568,7 +1834,7 @@ function LiveConsoleDockLayout({
                   )}
                 </div>
               )}
-            </>
+            </div>
           )}
         </aside>
     </LiveConsoleDockContext.Provider>

@@ -583,4 +583,70 @@ describe("createApp HTTP", () => {
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe("APP_NOT_FOUND");
   });
+
+  it("POST /v1/sessions/:id/test-recording-artifacts returns 404 when session missing", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const res = await request(app)
+      .post("/v1/sessions/nope/test-recording-artifacts")
+      .set("Authorization", "Bearer t")
+      .send({ targetId: "t1", replayLines: [] });
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("SESSION_NOT_FOUND");
+  });
+
+  it("POST test-recording-artifacts persists replayLines and GET reads back", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    await store.writeApps([
+      {
+        id: "tr-app",
+        name: "n",
+        executable: "/bin/true",
+        cwd: "/",
+        env: {},
+        args: [],
+        injectElectronDebugPort: false,
+      },
+    ]);
+    await store.writeProfiles([
+      { id: "tr-prof", appId: "tr-app", name: "p", env: {}, extraArgs: [] },
+    ]);
+    const manager = new SessionManager(store, dir);
+    manager.testOnly_seedRunningSession("tr-sess", "tr-prof");
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const clickLine = JSON.stringify({
+      schemaVersion: 1,
+      type: "click",
+      ts: 99,
+      x: 3,
+      y: 4,
+      viewportWidth: 100,
+      viewportHeight: 100,
+    });
+    const post = await request(app)
+      .post("/v1/sessions/tr-sess/test-recording-artifacts")
+      .set("Authorization", "Bearer t")
+      .send({ targetId: "tg1", recordingId: "http-rec-1", replayLines: [clickLine] });
+    expect(post.status).toBe(201);
+    expect(post.body.recordingId).toBe("http-rec-1");
+    expect(post.body.path).toContain("app-json");
+    expect(post.body.path).toContain("tr-app");
+
+    const list = await request(app)
+      .get("/v1/apps/tr-app/test-recording-artifacts")
+      .set("Authorization", "Bearer t");
+    expect(list.status).toBe(200);
+    expect(list.body.recordingIds).toContain("http-rec-1");
+
+    const one = await request(app)
+      .get("/v1/apps/tr-app/test-recording-artifacts/http-rec-1")
+      .set("Authorization", "Bearer t");
+    expect(one.status).toBe(200);
+    expect(one.body.sessionId).toBe("tr-sess");
+  });
 });

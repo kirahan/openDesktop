@@ -366,6 +366,90 @@ function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
       viewportHeight: v.vh
     }));
   };
+  var odInspectLabel = function(el){
+    if (!el || el.nodeType !== 1) return "";
+    var tag = (el.tagName && el.tagName.toLowerCase()) || "?";
+    var head = tag;
+    if (el.id) head += "#" + odClip(String(el.id), 48);
+    else if (typeof el.className === "string" && el.className) {
+      var cs = el.className.trim().split(/\\s+/).slice(0, 3);
+      for (var ci = 0; ci < cs.length; ci++) head += "." + odClip(cs[ci], 40);
+    }
+    var raw = "";
+    try {
+      raw = el.innerText ? String(el.innerText) : "";
+    } catch (e2) { raw = ""; }
+    raw = raw.replace(/\\s+/g, " ").trim();
+    if (raw.length > 0) {
+      var short = raw.length > 48 ? raw.slice(0, 48) + "…" : raw;
+      head += ' · "' + short + '"';
+    }
+    return odClip(head, 220);
+  };
+  var inspectRoot = document.createElement("div");
+  inspectRoot.id = "__odReplayInspectRoot";
+  inspectRoot.setAttribute("data-opendesktop-replay-inspect", "1");
+  inspectRoot.style.cssText = "position:fixed;left:0;top:0;right:0;bottom:0;pointer-events:none;z-index:2147483646;";
+  var inspectBox = document.createElement("div");
+  inspectBox.style.cssText = "position:absolute;display:none;box-sizing:border-box;border:1px solid #2563eb;border-radius:4px;background:rgba(37,99,235,0.06);pointer-events:none;";
+  var inspectTip = document.createElement("div");
+  inspectTip.style.cssText = "position:absolute;display:none;max-width:min(520px,calc(100vw - 16px));font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#2563eb;color:#fff;padding:4px 8px;border-radius:4px;box-shadow:0 2px 10px rgba(15,23,42,0.25);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;";
+  inspectRoot.appendChild(inspectBox);
+  inspectRoot.appendChild(inspectTip);
+  document.documentElement.appendChild(inspectRoot);
+  var inspectRaf = null;
+  var pendingInspectPt = null;
+  var flushInspect = function(){
+    inspectRaf = null;
+    if (!pendingInspectPt) return;
+    var px = pendingInspectPt.x;
+    var py = pendingInspectPt.y;
+    pendingInspectPt = null;
+    var el = document.elementFromPoint(px, py);
+    if (el && inspectRoot.contains(el)) {
+      inspectBox.style.display = "none";
+      inspectTip.style.display = "none";
+      return;
+    }
+    if (!el || el.nodeType !== 1) {
+      inspectBox.style.display = "none";
+      inspectTip.style.display = "none";
+      return;
+    }
+    if (el === document.documentElement || el === document.body) {
+      inspectBox.style.display = "none";
+      inspectTip.style.display = "none";
+      return;
+    }
+    var r = el.getBoundingClientRect();
+    if (r.width < 1 && r.height < 1) {
+      inspectBox.style.display = "none";
+      inspectTip.style.display = "none";
+      return;
+    }
+    inspectBox.style.display = "block";
+    inspectBox.style.left = r.left + "px";
+    inspectBox.style.top = r.top + "px";
+    inspectBox.style.width = r.width + "px";
+    inspectBox.style.height = r.height + "px";
+    inspectTip.textContent = odInspectLabel(el);
+    inspectTip.style.display = "block";
+    var tipH = 28;
+    try { tipH = inspectTip.getBoundingClientRect().height || tipH; } catch (e3) {}
+    var below = r.bottom + 6;
+    if (below + tipH > window.innerHeight - 8 && r.top > tipH + 12) {
+      inspectTip.style.left = Math.max(8, r.left) + "px";
+      inspectTip.style.top = Math.max(8, r.top - tipH - 6) + "px";
+    } else {
+      inspectTip.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 520)) + "px";
+      inspectTip.style.top = Math.min(below, window.innerHeight - tipH - 8) + "px";
+    }
+  };
+  var onInspectMove = function(e){
+    pendingInspectPt = { x: e.clientX, y: e.clientY };
+    if (inspectRaf !== null) return;
+    inspectRaf = requestAnimationFrame(flushInspect);
+  };
   var onDown = function(e){
     var v = vp();
     send(JSON.stringify({
@@ -394,6 +478,7 @@ function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
     }));
   };
   document.addEventListener("pointermove", onMove, true);
+  document.addEventListener("pointermove", onInspectMove, true);
   document.addEventListener("pointerdown", onDown, true);
   document.addEventListener("click", onClick, true);
   var snapTimer = setInterval(function(){
@@ -412,8 +497,18 @@ function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
   window.__odReplayCleanupV1 = function(){
     clearInterval(snapTimer);
     document.removeEventListener("pointermove", onMove, true);
+    document.removeEventListener("pointermove", onInspectMove, true);
     document.removeEventListener("pointerdown", onDown, true);
     document.removeEventListener("click", onClick, true);
+    if (inspectRaf !== null) {
+      try {
+        cancelAnimationFrame(inspectRaf);
+      } catch (e0) {}
+      inspectRaf = null;
+    }
+    try {
+      if (inspectRoot && inspectRoot.parentNode) inspectRoot.parentNode.removeChild(inspectRoot);
+    } catch (e1) {}
     delete window.__odReplayCleanupV1;
     delete window.__odReplayV1;
   };

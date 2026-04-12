@@ -58,6 +58,9 @@
 | `POST /v1/sessions/:id/targets/:targetId/rrweb/inject`         | 与上一行等价，`targetId` 取自路径。 |
 | `POST /v1/sessions/:id/rrweb/recording/stop`                   | **JSON** Body：`{ "targetId": "<page targetId>" }`。停止 rrweb 录制并移除 binding。无活跃录制时 **409** `RRWEB_RECORDER_NOT_ACTIVE`。 |
 | `GET /v1/sessions/:id/rrweb/stream?targetId=<id>`            | **SSE**：`data:` 行为 rrweb 事件 JSON（`type` 为数字）。须**先** `rrweb/recording/start` 或 `.../rrweb/inject`，否则 **503** `RRWEB_RECORDER_NOT_ACTIVE`。并发连接上限与 **429** `RRWEB_SSE_STREAM_LIMIT` 见实现；`event: ready` 中带 `rrwebBundleVersion`（与 Core 常量 `RRWEB_INJECT_BUNDLE_VERSION` 一致，当前与 npm `rrweb` **1.1.3** 对齐）。**说明**：注入后录制会立即产生 Meta(4) 与 FullSnapshot(2)，若晚于该时刻才连 SSE，旧实现会丢失基线；Core 会**缓冲**近期事件行并在新连接上**先重放缓冲**再推送增量（缓冲有上限，极长会话仍以当时缓冲为准）。 |
+| `POST /v1/sessions/:id/test-recording-artifacts`              | **JSON**：将矢量录制 NDJSON 行或完整制品写入磁盘，供后续 LLM 生成用例。须会话 **running**；**201** 响应含 `recordingId`、`path`（绝对路径）、`artifact`。二选一 Body：① `targetId` + `replayLines`（字符串数组，每元素一条与 `replay/stream` 一致的 JSON）；② 完整 `artifact`（须与 URL 中 `sessionId`、Profile 对应 `appId` 一致）。可选 `recordingId`（省略则自动生成）、`notes`、`pageContext`。 |
+| `GET /v1/apps/:appId/test-recording-artifacts`                | 列出该应用下已保存的测试录制 id（`recordingIds` 数组）。 |
+| `GET /v1/apps/:appId/test-recording-artifacts/:recordingId`   | 读取单份制品 JSON；不存在则 **404**。 |
 | `GET /v1/sessions/:id/logs/export?format=jsonl&level=error`   | 日志导出                                                                                               |
 | `GET /v1/agent/sessions/:id/snapshot`                         | OODA 结构化快照                                                                                         |
 | `POST /v1/agent/sessions/:id/actions`                         | Agent 动词，见下表                                                                                       |
@@ -117,6 +120,8 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 
 **操作配方目录**：默认 `<数据目录>/recipes/`；环境变量 `OPENDESKTOP_RECIPES_DIR`。步骤与 DOM 探索兜底见主 README 历史说明与 `openspec/specs/cdp-operation-recipes`。
 
+**应用侧 JSON 记录（测试录制等）**：默认根目录为 **`<数据目录>/app-json/`**，其下 **每个应用 id 一个子目录**，文件形如 `test-recording-<recordingId>.json`。可用环境变量 **`OPENDESKTOP_APP_JSON_DIR`** 将整个根目录指到其它绝对路径。制品可能含页面文本与 URL，默认视为本地调试数据，请勿在未脱敏时上传公网。规格见 `openspec/changes/test-recording-llm-capture/`。
+
 ---
 
 ## Agent 动词表（节选）
@@ -152,6 +157,7 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 | `OPENDESKTOP_EXTENDED_LOGS=0` | SSE 仅下发 `ts/stream/line` |
 | `OPENDESKTOP_AGENT_RPM`       | Agent 每分钟请求上限（默认 120）    |
 | `OPENDESKTOP_RECIPES_DIR`     | 操作配方根路径                  |
+| `OPENDESKTOP_APP_JSON_DIR`    | 应用侧 JSON 记录根路径（默认数据目录下 `app-json`） |
 
 
 ---
