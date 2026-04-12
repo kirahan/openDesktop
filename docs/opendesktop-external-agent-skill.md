@@ -221,12 +221,12 @@ When the **registered app** enables **useDedicatedProxy** and the child process 
 | Endpoint                               | Role                                                                                                                                         |
 | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `**GET /v1/sessions/:id/logs/export`** | Export process/Core logs (query params such as `format`, `level` — see implementation).                                                      |
-| `**GET /v1/version`**                  | `**capabilities**`, `**agentActions**`, `**sseObservabilityStreamPaths**` (paths for network / console / runtime-exception / **proxy** SSE). |
+| `**GET /v1/version`**                  | `**capabilities`**, `**agentActions**`, `**sseObservabilityStreamPaths**` (paths for network / console / runtime-exception / **proxy** SSE). |
 
 
 ### Not covered by `opd` CLI (see `docs/API.md`)
 
-User scripts (`.../user-scripts`, inject), DOM pick (`.../dom-pick/`*), recipes (`.../recipes/*`), and the **full** Agent verb set beyond what App-first wraps — all **Bearer HTTP** only unless you add your own scripts.
+User scripts (`.../user-scripts`, inject), DOM pick (`.../dom-pick/`*), recipes (`.../recipes/`*), and the **full** Agent verb set beyond what App-first wraps — all **Bearer HTTP** only unless you add your own scripts.
 
 ---
 
@@ -345,7 +345,7 @@ http://127.0.0.1:<corePort>/v1/sessions/<sessionId>/cdp
 
 Use the **full path** as the `connectOverCDP` endpoint (not only `host:port`), so `/json/version` resolves correctly.
 
-**Accessibility vs full DOM (Playwright over CDP):** If you attach with `**connectOverCDP`** (same gateway URL as above), prefer `**page.locator('body').ariaSnapshot()**` (compact YAML from the **accessibility tree**) when you need to **locate or reason about elements**—it is typically **much faster** than pulling and analyzing a **full DOM** (e.g. large `outerHTML`). For agents that **do not** use Playwright, stay portable with `**opd`** + Agent `**eval**` as in the steps above. **结论（仓库内实验结论）：** 用 `body.ariaSnapshot()` 通过无障碍信息识别元素，通常比分析完整 DOM 快得多。
+**Accessibility vs full DOM (Playwright over CDP):** If you attach with `**connectOverCDP`** (same gateway URL as above), prefer `**page.locator('body').ariaSnapshot()`** (compact YAML from the **accessibility tree**) when you need to **locate or reason about elements**—it is typically **much faster** than pulling and analyzing a **full DOM** (e.g. large `outerHTML`). For agents that **do not** use Playwright, stay portable with `**opd`** + Agent `**eval`** as in the steps above. **结论（仓库内实验结论）：** 用 `body.ariaSnapshot()` 通过无障碍信息识别元素，通常比分析完整 DOM 快得多。
 
 ---
 

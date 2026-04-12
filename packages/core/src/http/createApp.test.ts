@@ -18,10 +18,7 @@ import {
   resetRrwebSseCountForTest,
   tryAcquireRrwebSseStream,
 } from "../session-replay/rrwebSseLimiter.js";
-import {
-  resetRecordingRegistryForTest,
-  testOnly_registerStubRecording,
-} from "../session-replay/recordingService.js";
+import * as recordingService from "../session-replay/recordingService.js";
 import { loadConfig } from "../config.js";
 import { createApp } from "./createApp.js";
 import { SessionManager } from "../session/manager.js";
@@ -309,6 +306,36 @@ describe("createApp HTTP", () => {
     resetConsoleStreamCountForTest();
   });
 
+  it("POST /v1/sessions/:id/replay/recording/start passes injectPageControls to startPageRecording", async () => {
+    recordingService.resetRecordingRegistryForTest();
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const spy = vi.spyOn(recordingService, "startPageRecording").mockResolvedValue({ ok: true });
+    const on = await request(app)
+      .post("/v1/sessions/sid/replay/recording/start")
+      .set("Authorization", "Bearer t")
+      .send({ targetId: "T1", injectPageControls: true });
+    expect(on.status).toBe(200);
+    expect(spy).toHaveBeenCalledWith(manager, "sid", "T1", { injectPageControls: true });
+    const off = await request(app)
+      .post("/v1/sessions/sid2/replay/recording/start")
+      .set("Authorization", "Bearer t")
+      .send({ targetId: "T1" });
+    expect(off.status).toBe(200);
+    expect(spy).toHaveBeenCalledWith(manager, "sid2", "T1", { injectPageControls: true });
+    const noBar = await request(app)
+      .post("/v1/sessions/sid3/replay/recording/start")
+      .set("Authorization", "Bearer t")
+      .send({ targetId: "T1", injectPageControls: false });
+    expect(noBar.status).toBe(200);
+    expect(spy).toHaveBeenCalledWith(manager, "sid3", "T1", { injectPageControls: false });
+    spy.mockRestore();
+    recordingService.resetRecordingRegistryForTest();
+  });
+
   it("GET /v1/sessions/:id/replay/stream returns 401 without Bearer", async () => {
     dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
     const store = new JsonFileStore(dir);
@@ -320,7 +347,7 @@ describe("createApp HTTP", () => {
   });
 
   it("GET /v1/sessions/:id/replay/stream returns 503 when recording not active", async () => {
-    resetRecordingRegistryForTest();
+    recordingService.resetRecordingRegistryForTest();
     resetReplaySseCountForTest();
     dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
     const store = new JsonFileStore(dir);
@@ -343,7 +370,7 @@ describe("createApp HTTP", () => {
   });
 
   it("GET /v1/sessions/:id/replay/stream returns 403 when script execution disabled", async () => {
-    resetRecordingRegistryForTest();
+    recordingService.resetRecordingRegistryForTest();
     dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
     const store = new JsonFileStore(dir);
     const manager = new SessionManager(store, dir);
@@ -365,7 +392,7 @@ describe("createApp HTTP", () => {
   });
 
   it("GET /v1/sessions/:id/replay/stream returns 429 when replay SSE limit exceeded", async () => {
-    resetRecordingRegistryForTest();
+    recordingService.resetRecordingRegistryForTest();
     resetReplaySseCountForTest();
     for (let i = 0; i < 4; i++) {
       expect(tryAcquireReplaySseStream()).toBe(true);
@@ -375,7 +402,7 @@ describe("createApp HTTP", () => {
     const manager = new SessionManager(store, dir);
     const config = loadConfig({ dataDir: dir });
     const { app } = createApp({ config, token: "t", store, manager });
-    testOnly_registerStubRecording("sid", "T1");
+    recordingService.testOnly_registerStubRecording("sid", "T1");
     const spy = vi.spyOn(manager, "getOpsContext");
     spy.mockReturnValue({
       state: "running",
@@ -390,7 +417,7 @@ describe("createApp HTTP", () => {
     expect(res.body.error.code).toBe("REPLAY_SSE_STREAM_LIMIT");
     spy.mockRestore();
     resetReplaySseCountForTest();
-    resetRecordingRegistryForTest();
+    recordingService.resetRecordingRegistryForTest();
   });
 
   it("GET /v1/sessions/:id/rrweb/stream returns 401 without Bearer", async () => {

@@ -51,7 +51,7 @@
 | `GET /v1/sessions/:id/network/stream?targetId=<id>`           | **SSE**：请求完成元数据 JSON（无 body）。可选 `stripQuery`、`maxEventsPerSecond`。                                 |
 | `GET /v1/sessions/:id/proxy/stream`                           | **SSE**：本地转发代理观测（`proxyRequestComplete`）。专用代理未启用时 **503**。                                         |
 | `GET /v1/sessions/:id/runtime-exception/stream?targetId=<id>` | **SSE**：`Runtime.exceptionThrown`。须 `allowScriptExecution: true`。                                  |
-| `POST /v1/sessions/:id/replay/recording/start`                 | **JSON** Body：`{ "targetId": "<page targetId>" }`。对单 page 开启矢量录制（CDP 注入 + `Runtime.addBinding`）。须 `running` 且 `allowScriptExecution: true`。 |
+| `POST /v1/sessions/:id/replay/recording/start`                 | **JSON** Body：`{ "targetId": "<page targetId>" }`，可选 `"injectPageControls": true`（默认 false）。对单 page 开启矢量录制：CDP 注入监听脚本，并 `Runtime.addBinding` 注册 **`odOpenDesktopReplay`**（矢量 JSON 数据）。`injectPageControls` 为 true 时再注册第二条 binding **`odOpenDesktopReplayUi`**，并在页面注入底部悬浮控制条（根节点 id `__odReplayControlBar`）；控制条上的指针/点击不会写入矢量 JSON，指令经 UI binding 回传（见下）。须 `running` 且 `allowScriptExecution: true`。 |
 | `POST /v1/sessions/:id/replay/recording/stop`                  | **JSON** Body：`{ "targetId": "<page targetId>" }`。停止录制并释放注入。无活跃录制时 **409** `RECORDER_NOT_ACTIVE`。 |
 | `GET /v1/sessions/:id/replay/stream?targetId=<id>`             | **SSE**：推送录制事件 JSON（`data:` 行）。须**先** `replay/recording/start` 且会话仍 `running`，否则 **503** `RECORDER_NOT_ACTIVE`。并发连接上限与 **429** `REPLAY_SSE_STREAM_LIMIT` 见实现。 |
 | `POST /v1/sessions/:id/rrweb/recording/start`                  | **JSON** Body：`{ "targetId": "<page targetId>" }`。对单 page 注入构建产物 `inject.bundle.js`（IIFE）并 `Runtime.addBinding`（binding 名 `odOpenDesktopRrweb`）。须 `running` 且 `allowScriptExecution: true`。未构建注入包时 **503** `RRWEB_BUNDLE_NOT_FOUND`。 |
@@ -93,6 +93,19 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 ```
 
 `click` 事件可带可选字段 `target`，为点击目标节点的有限摘要（标签、`id`、`className`、若干 `data-*`、简化 `selector`、`role`），便于区分点了哪个元素；字段长度与条数在 Core 解析侧有上限。
+
+**页面内控制条与第二条 binding**：仅在 `injectPageControls: true` 时启用。UI binding 载荷为 JSON 对象：`{"cmd":"stop"}` 停止矢量录制；`{"cmd":"checkpoint"}` 向 `replay/stream` 推送一行 **`assertion_checkpoint`**（可选 `note` 字符串，长度有上限），用于标记断言/检查点时刻，**不**替代页面真实交互产生的矢量事件。控制条交互不应进入矢量 NDJSON；若需自动化，请通过该 UI 通道而非篡改矢量 JSON。
+
+**assertion_checkpoint** 行示例：
+
+```json
+{
+  "schemaVersion": 1,
+  "type": "assertion_checkpoint",
+  "ts": 1712812800000,
+  "note": "expected dashboard"
+}
+```
 
 ```json
 {

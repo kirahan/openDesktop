@@ -17,6 +17,7 @@ import {
   suggestedAppIdFromExecutablePath,
 } from "./appIdSuggest.js";
 import { mapReplayCoordsToObjectFitContain } from "./replay/replayOverlayMath.js";
+import { splitReplayLinesBySegmentMarkers } from "./replay/splitReplayLinesBySegmentMarkers.js";
 import { filterNonStructureReplayLines } from "./replay/structureSnapshotTree.js";
 import { RrwebReplayView } from "./replay/RrwebReplayView.js";
 import { RrwebStreamDiagnostics } from "./replay/rrwebDiagnosticsPanel.js";
@@ -595,7 +596,10 @@ function filterVectorLinesForTestRecordingArtifact(lines: string[]): string[] {
         typ === "pointermove" ||
         typ === "pointerdown" ||
         typ === "click" ||
-        typ === "structure_snapshot"
+        typ === "structure_snapshot" ||
+        typ === "assertion_checkpoint" ||
+        typ === "segment_start" ||
+        typ === "segment_end"
       ) {
         out.push(line);
       }
@@ -604,6 +608,15 @@ function filterVectorLinesForTestRecordingArtifact(lines: string[]): string[] {
     }
   }
   return out;
+}
+
+/** 与矢量预览「复制 BDD 提示词」同一套说明，仅替换中间数据块 */
+function buildBddFeaturePromptBlock(dataBlock: string): string {
+  const truncated =
+    dataBlock.length > 20000
+      ? `${dataBlock.slice(0, 20000)}\n\n…（已截断，请配合完整落盘文件或自行拼接）`
+      : dataBlock;
+  return `你是测试工程师。下列为矢量录制 JSON（每行一条）。请据此编写 Gherkin 风格的 BDD Feature 文件（步骤描述可用中文）。\n\n分析重点（优先遵守）：\n- 以用户意图与完整流程为主：通读时间线，推断用户在完成什么任务；用业务语言概括场景，不要逐条复述或堆砌坐标数字。\n- pointermove 等事件里的 x、y、viewportWidth 等仅作辅助理解顺序，默认不要在 Given/When/Then 里写具体像素坐标。\n- 更有价值的是 click（及带 target 时）：用 target 中的 tagName、id、className、selector、data-*、role、可见文本等，翻译成可读的控件或区域描述（例如输入框、置顶会话项、工具栏图标），用于步骤表述。\n- 若连续多条仅为移动指针而无新的有效交互，可合并为「浏览或定位」类描述，不必为每次采样单独一步。\n- segment_start / segment_end / assertion_checkpoint 表示人工标记的分段或检查点，可在 Scenario 边界或 Then 预期中体现。\n\n输出要求：\n- 输出完整 Feature，含 Feature、Scenario，以及 Given / When / Then（或团队约定的中文关键词）。\n- 步骤顺序与录制中的有效交互顺序一致（以 click 等业务节点为主线）。\n- 不要编造录制中不存在的行为；未出现的输入、接口结果等不要写死。\n\n--- 录制数据开始 ---\n${truncated}\n--- 录制数据结束 ---`;
 }
 
 /** 右侧抽屉内 SSE 类型：与 Core `GET .../console|network|runtime-exception|proxy/stream` 及 `logs/stream` 对齐 */
@@ -691,7 +704,7 @@ function observabilityStreamHint(kind: ObservabilityStreamKind): string {
     case "mainlog":
       return "SSE · Core 拉起的子进程 stdout/stderr（连接前先推送已有缓冲）· 与渲染进程 DevTools 控制台不是同一路";
     case "replay":
-      return "须先 POST 开启录制；清屏仅清空本标签视图，不自动停止服务端录制（点停止会结束订阅并请求 stop）。有数据后可点「落盘测试录制」写入 app-json。";
+      return "须先 POST 开启录制。目标页底部默认显示标记条（段开始、段结束、检查点；非本窗口）。清屏仅清空本标签；点抽屉内「停止」会结束订阅并请求 stop。有数据后可「落盘测试录制」。";
     case "rrweb":
       return "须先 POST 开启 rrweb 录制（或「注入录制包」）；SSE data 帧为 rrweb JSON（type 为数字）；清屏清空本标签累积事件；停止会结束订阅并请求 rrweb stop";
     default:
@@ -903,10 +916,7 @@ function VectorReplayPreview({
   }, [screenshotWhileRunning, apiRoot, sessionId, targetId, token]);
 
   const copyBddPrompt = useCallback(async () => {
-    const body = logLinesWithoutStructure.join("\n");
-    const truncated =
-      body.length > 20000 ? `${body.slice(0, 20000)}\n\n…（已截断，请配合完整落盘文件或自行拼接）` : body;
-    const prompt = `你是测试工程师。请根据下列矢量录制 JSON（每行一条 JSON，含 pointer、click 等事件）编写 Gherkin 风格的 BDD 自然语言测试用例文件。\n\n要求：\n- 输出一个完整的 Feature 文件内容（步骤描述可用中文）。\n- 包含 Feature、Scenario，以及 Given / When / Then（或团队约定的中文关键词）。\n- 步骤顺序应与录制中的用户操作顺序一致。\n- 不要编造录制中不存在的行为。\n\n--- 录制数据开始 ---\n${truncated}\n--- 录制数据结束 ---`;
+    const prompt = buildBddFeaturePromptBlock(logLinesWithoutStructure.join("\n"));
     const ok = await copyToClipboard(prompt);
     if (ok) {
       setBddCopied(true);
@@ -1021,7 +1031,7 @@ function VectorReplayPreview({
         </button>
         {bddCopied ? <span style={{ fontSize: 11, color: "#166534" }}>已复制到剪贴板</span> : null}
         <span style={{ fontSize: 10, color: OBS_PALETTE.textMuted, lineHeight: 1.4 }}>
-          将提示词粘贴到大模型即可生成 Gherkin 风格用例；背景为当前窗口截图（轻度虚化），录制中约每 5 秒刷新
+          将提示词粘贴到大模型即可生成侧重行为与点击目标的 Gherkin 用例；背景为当前窗口截图（轻度虚化），录制中约每 5 秒刷新
         </span>
       </div>
       {logLinesWithoutStructure.length > 0 && (
@@ -1069,6 +1079,10 @@ function LiveConsoleDockLayout({
 
   const [testRecPersistMsg, setTestRecPersistMsg] = useState<string | null>(null);
   const [testRecPersistBusy, setTestRecPersistBusy] = useState(false);
+  /** 本会话在观测页成功落盘的测试录制（用于列表与按条复制 BDD 提示词） */
+  const [persistedTestRecordings, setPersistedTestRecordings] = useState<
+    { appId: string; recordingId: string }[]
+  >([]);
 
   useEffect(() => {
     setTestRecPersistMsg(null);
@@ -1084,41 +1098,41 @@ function LiveConsoleDockLayout({
   }, [drawerOpen]);
 
   const stopStream = useCallback(
-    (tabId: string) => {
+    async (tabId: string): Promise<void> => {
       const tab = tabsRef.current.find((x) => x.id === tabId);
-      if (tab?.streamKind === "replay") {
+      const tok = token.trim();
+      if (tab?.streamKind === "replay" && tok) {
         const base = apiRoot.replace(/\/$/, "");
         const stopUrl = `${base}/v1/sessions/${tab.sessionId}/replay/recording/stop`;
-        const tok = token.trim();
-        if (tok) {
-          void fetch(stopUrl, {
+        try {
+          const res = await fetch(stopUrl, {
             method: "POST",
             headers: {
               Authorization: `Bearer ${tok}`,
               "Content-Type": "application/json",
             },
             body: JSON.stringify({ targetId: tab.targetId }),
-          }).then((res) => {
-            /* 无活跃录制时 Core 返回 409，视为幂等成功，避免控制台无意义告警 */
-            if (!res.ok && res.status !== 409) void res.text().catch(() => undefined);
-          }).catch(() => undefined);
+          });
+          /* 无活跃录制时 Core 返回 409，视为幂等成功 */
+          if (!res.ok && res.status !== 409) void res.text().catch(() => undefined);
+        } catch {
+          /* noop */
         }
-      }
-      if (tab?.streamKind === "rrweb") {
+      } else if (tab?.streamKind === "rrweb" && tok) {
         const base = apiRoot.replace(/\/$/, "");
         const stopUrl = `${base}/v1/sessions/${tab.sessionId}/rrweb/recording/stop`;
-        const tok = token.trim();
-        if (tok) {
-          void fetch(stopUrl, {
+        try {
+          const res = await fetch(stopUrl, {
             method: "POST",
             headers: {
               Authorization: `Bearer ${tok}`,
               "Content-Type": "application/json",
             },
             body: JSON.stringify({ targetId: tab.targetId }),
-          }).then((res) => {
-            if (!res.ok && res.status !== 409) void res.text().catch(() => undefined);
-          }).catch(() => undefined);
+          });
+          if (!res.ok && res.status !== 409) void res.text().catch(() => undefined);
+        } catch {
+          /* noop */
         }
       }
       abortMap.current.get(tabId)?.abort();
@@ -1147,7 +1161,7 @@ function LiveConsoleDockLayout({
 
   const closeTab = useCallback(
     (tabId: string) => {
-      stopStream(tabId);
+      void stopStream(tabId);
       setTabs((prev) => {
         const next = prev.filter((t) => t.id !== tabId);
         setActiveId((a) => {
@@ -1167,7 +1181,7 @@ function LiveConsoleDockLayout({
       targetId: string,
       streamKind: ObservabilityStreamKind,
     ) => {
-      stopStream(tabId);
+      await stopStream(tabId);
       setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, err: null, running: true } : t)));
       const ac = new AbortController();
       abortMap.current.set(tabId, ac);
@@ -1204,7 +1218,9 @@ function LiveConsoleDockLayout({
               Authorization: `Bearer ${tokenTrim}`,
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ targetId }),
+            body: JSON.stringify(
+              streamKind === "replay" ? { targetId, injectPageControls: true } : { targetId },
+            ),
             signal: ac.signal,
           });
           if (!startRes.ok) {
@@ -1450,6 +1466,32 @@ function LiveConsoleDockLayout({
     [startStream],
   );
 
+  const copyBddPromptForPersistedArtifact = useCallback(
+    async (item: { appId: string; recordingId: string }) => {
+      const tokenTrim = token.trim();
+      if (!tokenTrim) return;
+      const base = apiRoot.replace(/\/$/, "");
+      const url = `${base}/v1/apps/${encodeURIComponent(item.appId)}/test-recording-artifacts/${encodeURIComponent(item.recordingId)}`;
+      try {
+        const res = await fetch(url, { headers: { Authorization: `Bearer ${tokenTrim}` } });
+        const tx = await res.text();
+        if (!res.ok) {
+          setTestRecPersistMsg(`✗ 读取制品失败 HTTP ${String(res.status)}`);
+          return;
+        }
+        const artifact = JSON.parse(tx) as Record<string, unknown>;
+        const dataBlock = JSON.stringify(artifact, null, 2);
+        const prompt = buildBddFeaturePromptBlock(dataBlock);
+        const ok = await copyToClipboard(prompt);
+        if (ok) setTestRecPersistMsg(`✓ 已复制 BDD 提示词（${item.recordingId}）`);
+        else setTestRecPersistMsg("✗ 复制失败");
+      } catch (e) {
+        setTestRecPersistMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+    [apiRoot, token],
+  );
+
   const persistVectorTestRecording = useCallback(async () => {
     const tab = tabsRef.current.find((x) => x.id === activeId);
     if (!tab || tab.streamKind !== "replay") return;
@@ -1460,42 +1502,76 @@ function LiveConsoleDockLayout({
       setTestRecPersistMsg("✗ 没有可落盘的矢量 JSON 行，请先「开始矢量录制流」并产生数据");
       return;
     }
+    const chunks = splitReplayLinesBySegmentMarkers(replayLines);
+    if (chunks.length === 0) {
+      setTestRecPersistMsg("✗ 分段后无可落盘内容");
+      return;
+    }
     setTestRecPersistBusy(true);
     setTestRecPersistMsg(null);
     try {
       const base = apiRoot.replace(/\/$/, "");
       const url = `${base}/v1/sessions/${encodeURIComponent(tab.sessionId)}/test-recording-artifacts`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${tokenTrim}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          targetId: tab.targetId,
-          replayLines,
-        }),
-      });
-      const tx = await res.text();
-      if (!res.ok) {
-        let msg = `HTTP ${String(res.status)}`;
-        try {
-          const j = JSON.parse(tx) as { error?: { message?: string; code?: string } };
-          msg = j.error?.message ?? j.error?.code ?? msg;
-        } catch {
-          msg = tx.slice(0, 280);
+      const stamp = `r${String(Date.now())}`;
+      const parts: string[] = [];
+      for (let idx = 0; idx < chunks.length; idx++) {
+        const recordingId =
+          chunks.length === 1 ? undefined : `${stamp}-p${String(idx + 1)}`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tokenTrim}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            targetId: tab.targetId,
+            replayLines: chunks[idx],
+            ...(recordingId !== undefined ? { recordingId } : {}),
+          }),
+        });
+        const tx = await res.text();
+        if (!res.ok) {
+          let msg = `HTTP ${String(res.status)}`;
+          try {
+            const j = JSON.parse(tx) as { error?: { message?: string; code?: string } };
+            msg = j.error?.message ?? j.error?.code ?? msg;
+          } catch {
+            msg = tx.slice(0, 280);
+          }
+          const prefix =
+            chunks.length > 1
+              ? `✗ 第 ${String(idx + 1)}/${String(chunks.length)} 段落盘失败：`
+              : "✗ ";
+          setTestRecPersistMsg(`${prefix}${msg}`);
+          return;
         }
-        setTestRecPersistMsg(`✗ ${msg}`);
-        return;
+        try {
+          const j = JSON.parse(tx) as {
+            path?: string;
+            recordingId?: string;
+            artifact?: { appId?: string };
+          };
+          const rid = String(j.recordingId ?? "?");
+          const pth = String(j.path ?? "");
+          parts.push(`${rid} · ${pth}`);
+          if (typeof j.recordingId === "string" && j.artifact && typeof j.artifact.appId === "string") {
+            setPersistedTestRecordings((prev) => {
+              const next = [{ appId: j.artifact!.appId!, recordingId: j.recordingId! }, ...prev];
+              const deduped = next.filter(
+                (x, i, a) => a.findIndex((y) => y.appId === x.appId && y.recordingId === x.recordingId) === i,
+              );
+              return deduped.slice(0, 25);
+            });
+          }
+        } catch {
+          parts.push("?");
+        }
       }
-      try {
-        const j = JSON.parse(tx) as { path?: string; recordingId?: string };
-        setTestRecPersistMsg(
-          `✓ 已落盘 recordingId=${String(j.recordingId ?? "?")} · ${String(j.path ?? "")}`,
-        );
-      } catch {
-        setTestRecPersistMsg("✓ 已落盘");
-      }
+      const summary =
+        chunks.length > 1
+          ? `✓ 已落盘 ${String(chunks.length)} 个制品（按 segment 分段）\n${parts.join("\n")}`
+          : `✓ 已落盘 ${parts[0] ?? ""}`;
+      setTestRecPersistMsg(summary);
     } catch (e) {
       setTestRecPersistMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -1756,6 +1832,56 @@ function LiveConsoleDockLayout({
                     >
                       {testRecPersistMsg}
                     </p>
+                  ) : null}
+                  {active.streamKind === "replay" && persistedTestRecordings.length > 0 ? (
+                    <div
+                      style={{
+                        marginTop: 4,
+                        padding: 8,
+                        borderRadius: 8,
+                        border: `1px solid ${OBS_PALETTE.border}`,
+                        background: "#f8fafc",
+                        maxHeight: 200,
+                        overflow: "auto",
+                      }}
+                    >
+                      <div style={{ fontSize: 11, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+                        已落盘测试录制
+                      </div>
+                      <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+                        {persistedTestRecordings.map((item) => (
+                          <li
+                            key={`${item.appId}::${item.recordingId}`}
+                            style={{
+                              display: "flex",
+                              flexWrap: "wrap",
+                              alignItems: "center",
+                              gap: 8,
+                              fontSize: 10,
+                            }}
+                          >
+                            <code
+                              style={{
+                                fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+                                color: "#0f172a",
+                                wordBreak: "break-all",
+                                flex: "1 1 120px",
+                              }}
+                            >
+                              {item.recordingId}
+                            </code>
+                            <button
+                              type="button"
+                              disabled={!tokenOk || testRecPersistBusy}
+                              onClick={() => void copyBddPromptForPersistedArtifact(item)}
+                              style={pageInspectorBtnStyle(!tokenOk || testRecPersistBusy)}
+                            >
+                              复制 BDD 提示词
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   ) : null}
                   {active.err && (
                     <div style={{ fontSize: 11, color: "#991b1b", lineHeight: 1.4 }}>{active.err}</div>

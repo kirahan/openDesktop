@@ -94,6 +94,60 @@ describe("parseReplayEnvelope", () => {
     }
   });
 
+  it("accepts assertion_checkpoint with optional note", () => {
+    const v = parseReplayEnvelope({
+      schemaVersion: REPLAY_SCHEMA_VERSION,
+      type: "assertion_checkpoint",
+      ts: 100,
+      note: "after login",
+    });
+    expect(v?.type).toBe("assertion_checkpoint");
+    if (v?.type === "assertion_checkpoint") {
+      expect(v.ts).toBe(100);
+      expect(v.note).toBe("after login");
+    }
+  });
+
+  it("accepts assertion_checkpoint without note", () => {
+    const v = parseReplayEnvelope({
+      schemaVersion: REPLAY_SCHEMA_VERSION,
+      type: "assertion_checkpoint",
+      ts: 101,
+    });
+    expect(v?.type).toBe("assertion_checkpoint");
+    if (v?.type === "assertion_checkpoint") {
+      expect(v.note).toBeUndefined();
+    }
+  });
+
+  it("rejects assertion_checkpoint when note is not a string", () => {
+    expect(
+      parseReplayEnvelope({
+        schemaVersion: REPLAY_SCHEMA_VERSION,
+        type: "assertion_checkpoint",
+        ts: 1,
+        note: 1,
+      }),
+    ).toBeNull();
+  });
+
+  it("accepts segment_start and segment_end", () => {
+    const a = parseReplayEnvelope({
+      schemaVersion: REPLAY_SCHEMA_VERSION,
+      type: "segment_start",
+      ts: 200,
+    });
+    expect(a?.type).toBe("segment_start");
+    const b = parseReplayEnvelope({
+      schemaVersion: REPLAY_SCHEMA_VERSION,
+      type: "segment_end",
+      ts: 201,
+      note: "done",
+    });
+    expect(b?.type).toBe("segment_end");
+    if (b?.type === "segment_end") expect(b.note).toBe("done");
+  });
+
   it("rejects click when target is present but invalid", () => {
     expect(
       parseReplayEnvelope({

@@ -841,14 +841,15 @@ export function createApp(deps: AppDeps): CreateAppResult {
   });
 
   v1.post("/sessions/:sessionId/replay/recording/start", async (req, res) => {
-    const body = req.body as { targetId?: string };
+    const body = req.body as { targetId?: string; injectPageControls?: unknown };
     const targetId = typeof body?.targetId === "string" ? body.targetId.trim() : "";
     if (!targetId) {
       return jsonError(res, 400, "VALIDATION_ERROR", "targetId required");
     }
+    const injectPageControls = body?.injectPageControls !== false;
     const sessionId = req.params.sessionId;
     sweepStalePageRecordings(manager);
-    const result = await startPageRecording(manager, sessionId, targetId);
+    const result = await startPageRecording(manager, sessionId, targetId, { injectPageControls });
     if ("error" in result) {
       const code = result.code;
       const status =

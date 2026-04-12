@@ -12,6 +12,8 @@ import {
 import { parseReplayEnvelopeJsonString } from "./schema.js";
 
 const BINDING_NAME = "odOpenDesktopReplay";
+/** 页面内控制条指令（停止录制、断言检查点等），与数据 binding 分离 */
+export const REPLAY_UI_BINDING_NAME = "odOpenDesktopReplayUi";
 /** 页面内 pointermove 最小间隔 ms；Core 侧二次限流见 {@link POINTER_MOVE_MIN_INTERVAL_MS} */
 const PAGE_MOVE_MIN_MS = 50;
 const SNAPSHOT_INTERVAL_MS = 12_000;
@@ -25,16 +27,125 @@ export type RecordingHandle = {
   close(): Promise<void>;
 };
 
+/** 页面注入脚本里 UI binding 的 JSON 载荷（不启停录制，仅打标） */
+export type ReplayUiCommand =
+  | { kind: "segment_start"; note?: string }
+  | { kind: "segment_end"; note?: string }
+  | { kind: "checkpoint"; note?: string };
+
+const MAX_UI_NOTE_LEN = 500;
+/** UI 标记行在 SSE 连接前产生时暂存，新订阅者会补发，避免丢失 */
+const UI_CATCH_UP_BUFFER_CAP = 32;
+
+/**
+ * 解析 `REPLAY_UI_BINDING_NAME` 的 payload（供单测与 Core 路由）。
+ */
+export function parseReplayUiCommand(payload: string): ReplayUiCommand | null {
+  try {
+    const cmd = JSON.parse(payload) as unknown;
+    if (!cmd || typeof cmd !== "object") return null;
+    const o = cmd as { cmd?: unknown; note?: unknown };
+    if (o.cmd === "segment_start") {
+      if (o.note !== undefined && typeof o.note !== "string") return null;
+      const note =
+        typeof o.note === "string" && o.note.length > 0
+          ? o.note.length > MAX_UI_NOTE_LEN
+            ? o.note.slice(0, MAX_UI_NOTE_LEN)
+            : o.note
+          : undefined;
+      return { kind: "segment_start", note };
+    }
+    if (o.cmd === "segment_end") {
+      if (o.note !== undefined && typeof o.note !== "string") return null;
+      const note =
+        typeof o.note === "string" && o.note.length > 0
+          ? o.note.length > MAX_UI_NOTE_LEN
+            ? o.note.slice(0, MAX_UI_NOTE_LEN)
+            : o.note
+          : undefined;
+      return { kind: "segment_end", note };
+    }
+    if (o.cmd === "checkpoint") {
+      if (o.note !== undefined && typeof o.note !== "string") return null;
+      const note =
+        typeof o.note === "string" && o.note.length > 0
+          ? o.note.length > MAX_UI_NOTE_LEN
+            ? o.note.slice(0, MAX_UI_NOTE_LEN)
+            : o.note
+          : undefined;
+      return { kind: "checkpoint", note };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export type StartPageRecordingOptions = {
+  /**
+   * 为 false 时不注入页面控制条；省略或其它值视为 true（默认开启）。
+   */
+  injectPageControls?: boolean;
+}
+
 class ActiveRecording implements RecordingHandle {
   readonly subscribers = new Set<Subscriber>();
   private readonly pointerState = createPointerThrottleState();
+  private readonly uiCatchUpBuffer: string[] = [];
   private readonly cdp: BrowserCdp;
   private readonly flatSessionId: string;
+  private readonly registerUiBinding: boolean;
   private closed = false;
 
-  constructor(cdp: BrowserCdp, flatSessionId: string) {
+  constructor(cdp: BrowserCdp, flatSessionId: string, registerUiBinding: boolean) {
     this.cdp = cdp;
     this.flatSessionId = flatSessionId;
+    this.registerUiBinding = registerUiBinding;
+  }
+
+  /** 向 SSE 推送一条 UI 标记行（检查点 / 段起止），并写入补发缓冲 */
+  private pushUiMarkerLine(line: string): void {
+    if (this.uiCatchUpBuffer.length >= UI_CATCH_UP_BUFFER_CAP) {
+      this.uiCatchUpBuffer.shift();
+    }
+    this.uiCatchUpBuffer.push(line);
+    for (const fn of this.subscribers) {
+      try {
+        fn(line);
+      } catch {
+        /* noop */
+      }
+    }
+  }
+
+  private emitUiMarkerType(
+    type: "assertion_checkpoint" | "segment_start" | "segment_end",
+    note?: string,
+  ): void {
+    const payload: Record<string, unknown> = {
+      schemaVersion: 1,
+      type,
+      ts: Date.now(),
+    };
+    if (typeof note === "string" && note.length > 0) {
+      payload.note = note.length > MAX_UI_NOTE_LEN ? note.slice(0, MAX_UI_NOTE_LEN) : note;
+    }
+    this.pushUiMarkerLine(JSON.stringify(payload));
+  }
+
+  /** 由 Core 侧 UI binding 调用，向 SSE 推送 assertion_checkpoint 行 */
+  emitAssertionCheckpoint(note?: string): void {
+    this.emitUiMarkerType("assertion_checkpoint", note);
+  }
+
+  /** 段开始标记（多段连续操作） */
+  emitSegmentStart(note?: string): void {
+    this.emitUiMarkerType("segment_start", note);
+  }
+
+  /** 段结束标记 */
+  emitSegmentEnd(note?: string): void {
+    this.emitUiMarkerType("segment_end", note);
   }
 
   dispatchBindingPayload(payload: string): void {
@@ -54,6 +165,13 @@ class ActiveRecording implements RecordingHandle {
 
   subscribe(fn: Subscriber): () => void {
     this.subscribers.add(fn);
+    for (const line of this.uiCatchUpBuffer) {
+      try {
+        fn(line);
+      } catch {
+        /* noop */
+      }
+    }
     return () => {
       this.subscribers.delete(fn);
     };
@@ -62,6 +180,7 @@ class ActiveRecording implements RecordingHandle {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.uiCatchUpBuffer.length = 0;
     this.subscribers.clear();
     try {
       await this.cdp.send(
@@ -79,6 +198,13 @@ class ActiveRecording implements RecordingHandle {
       await this.cdp.send("Runtime.removeBinding", { name: BINDING_NAME }, this.flatSessionId);
     } catch {
       /* 兼容旧协议 */
+    }
+    if (this.registerUiBinding) {
+      try {
+        await this.cdp.send("Runtime.removeBinding", { name: REPLAY_UI_BINDING_NAME }, this.flatSessionId);
+      } catch {
+        /* noop */
+      }
     }
     try {
       this.cdp.close();
@@ -153,6 +279,7 @@ export async function startPageRecording(
   manager: SessionManager,
   sessionId: string,
   targetId: string,
+  options?: StartPageRecordingOptions,
 ): Promise<{ ok: true } | { error: string; code: string }> {
   sweepDeadSessions(manager);
   const ctx = manager.getOpsContext(sessionId);
@@ -191,18 +318,39 @@ export async function startPageRecording(
     flatSessionId = await attachToTargetSession(cdp, targetId);
     await cdp.send("Runtime.enable", {}, flatSessionId);
     await cdp.send("Runtime.addBinding", { name: BINDING_NAME }, flatSessionId);
+    const injectControls = options?.injectPageControls !== false;
+    if (injectControls) {
+      await cdp.send("Runtime.addBinding", { name: REPLAY_UI_BINDING_NAME }, flatSessionId);
+    }
 
-    const rec = new ActiveRecording(cdp, flatSessionId);
+    const rec = new ActiveRecording(cdp, flatSessionId, injectControls);
 
     cdp.onProtocolEvent = (method, params, eventSessionId) => {
       if (method !== "Runtime.bindingCalled") return;
       if (eventSessionId !== undefined && eventSessionId !== flatSessionId) return;
       const p = params as { name?: string; payload?: string };
-      if (p.name !== BINDING_NAME) return;
-      rec.dispatchBindingPayload(p.payload ?? "");
+      if (p.name === BINDING_NAME) {
+        rec.dispatchBindingPayload(p.payload ?? "");
+        return;
+      }
+      if (p.name === REPLAY_UI_BINDING_NAME) {
+        const ui = parseReplayUiCommand(p.payload ?? "");
+        if (!ui) return;
+        if (ui.kind === "segment_start") {
+          rec.emitSegmentStart(ui.note);
+          return;
+        }
+        if (ui.kind === "segment_end") {
+          rec.emitSegmentEnd(ui.note);
+          return;
+        }
+        if (ui.kind === "checkpoint") {
+          rec.emitAssertionCheckpoint(ui.note);
+        }
+      }
     };
 
-    const inject = buildInjectExpression(PAGE_MOVE_MIN_MS, SNAPSHOT_INTERVAL_MS);
+    const inject = buildInjectExpression(PAGE_MOVE_MIN_MS, SNAPSHOT_INTERVAL_MS, injectControls);
     const ev = (await cdp.send(
       "Runtime.evaluate",
       { expression: inject, awaitPromise: true },
@@ -267,16 +415,93 @@ export function resetRecordingRegistryForTest(): void {
   recordings.clear();
 }
 
-function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
+function buildInjectExpression(moveMinMs: number, snapshotMs: number, injectControls: boolean): string {
   const move = Number(moveMinMs);
   const snap = Number(snapshotMs);
+  const uiName = REPLAY_UI_BINDING_NAME;
+  const controlBarInit = injectControls
+    ? `
+  var controlRoot = document.createElement("div");
+  controlRoot.id = "__odReplayControlBar";
+  controlRoot.setAttribute("data-opendesktop-replay-ui","control-bar");
+  controlRoot.style.cssText = "position:fixed;left:50%;bottom:12px;transform:translateX(-50%);z-index:2147483647;display:flex;gap:8px;align-items:center;padding:6px 10px;background:rgba(15,23,42,0.92);border-radius:8px;font:12px/1.2 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.25);";
+  var uiSend = function(obj){ try { ${uiName}(JSON.stringify(obj)); } catch(eu){} };
+  var odSegOpen = false;
+  var btnSegStart = null;
+  var btnSegEnd = null;
+  var btnBaseStyle = "border:none;border-radius:6px;padding:4px 10px;background:#2563eb;color:#fff;transition:transform 0.15s ease,filter 0.15s ease,box-shadow 0.15s ease;";
+  var flashBtn = function(b){
+    b.style.transform = "scale(0.94)";
+    b.style.filter = "brightness(1.18)";
+    b.style.boxShadow = "0 0 0 2px rgba(147,197,253,0.95)";
+    setTimeout(function(){
+      b.style.transform = "";
+      b.style.filter = "";
+      b.style.boxShadow = "";
+    }, 220);
+  };
+  var syncSegButtons = function(){
+    if (!btnSegStart || !btnSegEnd) return;
+    btnSegStart.disabled = odSegOpen;
+    btnSegEnd.disabled = !odSegOpen;
+    btnSegStart.style.opacity = odSegOpen ? "0.42" : "1";
+    btnSegEnd.style.opacity = !odSegOpen ? "0.42" : "1";
+    btnSegStart.style.cursor = odSegOpen ? "not-allowed" : "pointer";
+    btnSegEnd.style.cursor = !odSegOpen ? "not-allowed" : "pointer";
+  };
+  btnSegStart = document.createElement("button");
+  btnSegStart.type = "button";
+  btnSegStart.textContent = "\\u6bb5\\u5f00\\u59cb";
+  btnSegStart.style.cssText = "cursor:pointer;" + btnBaseStyle;
+  btnSegStart.addEventListener("click", function(ev){
+    ev.stopPropagation();
+    if (odSegOpen) return;
+    flashBtn(btnSegStart);
+    uiSend({cmd:"segment_start"});
+    odSegOpen = true;
+    syncSegButtons();
+  });
+  btnSegEnd = document.createElement("button");
+  btnSegEnd.type = "button";
+  btnSegEnd.textContent = "\\u6bb5\\u7ed3\\u675f";
+  btnSegEnd.style.cssText = "cursor:not-allowed;" + btnBaseStyle;
+  btnSegEnd.addEventListener("click", function(ev){
+    ev.stopPropagation();
+    if (!odSegOpen) return;
+    flashBtn(btnSegEnd);
+    uiSend({cmd:"segment_end"});
+    odSegOpen = false;
+    syncSegButtons();
+  });
+  var btnCheckpoint = document.createElement("button");
+  btnCheckpoint.type = "button";
+  btnCheckpoint.textContent = "\\u68c0\\u67e5\\u70b9";
+  btnCheckpoint.style.cssText = "cursor:pointer;" + btnBaseStyle;
+  btnCheckpoint.addEventListener("click", function(ev){
+    ev.stopPropagation();
+    flashBtn(btnCheckpoint);
+    uiSend({cmd:"checkpoint"});
+  });
+  controlRoot.appendChild(btnSegStart);
+  controlRoot.appendChild(btnSegEnd);
+  controlRoot.appendChild(btnCheckpoint);
+  syncSegButtons();
+  document.documentElement.appendChild(controlRoot);
+`
+    : `
+  var controlRoot = null;
+`;
   return `(function(){
   if (window.__odReplayV1) return "skip";
   window.__odReplayV1 = true;
   var MOVE_MIN = ${move};
   var SNAP_MS = ${snap};
+  ${controlBarInit}
   var send = function(s){
     try { ${BINDING_NAME}(s); } catch (e) {}
+  };
+  var odFromControlBar = function(e){
+    return !!(controlRoot && e && e.target && controlRoot.contains(e.target));
   };
   var vp = function(){
     return {
@@ -352,6 +577,7 @@ function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
   };
   var lastMove = 0;
   var onMove = function(e){
+    if (odFromControlBar(e)) return;
     var n = performance.now();
     if (n - lastMove < MOVE_MIN) return;
     lastMove = n;
@@ -416,6 +642,11 @@ function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
       inspectTip.style.display = "none";
       return;
     }
+    if (controlRoot && controlRoot.contains(el)) {
+      inspectBox.style.display = "none";
+      inspectTip.style.display = "none";
+      return;
+    }
     if (el === document.documentElement || el === document.body) {
       inspectBox.style.display = "none";
       inspectTip.style.display = "none";
@@ -451,6 +682,7 @@ function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
     inspectRaf = requestAnimationFrame(flushInspect);
   };
   var onDown = function(e){
+    if (odFromControlBar(e)) return;
     var v = vp();
     send(JSON.stringify({
       schemaVersion: 1,
@@ -464,6 +696,7 @@ function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
     }));
   };
   var onClick = function(e){
+    if (odFromControlBar(e)) return;
     var v = vp();
     var tgt = odSummarizeClickTarget(e.target);
     send(JSON.stringify({
@@ -509,9 +742,23 @@ function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
     try {
       if (inspectRoot && inspectRoot.parentNode) inspectRoot.parentNode.removeChild(inspectRoot);
     } catch (e1) {}
+    try {
+      if (controlRoot && controlRoot.parentNode) controlRoot.parentNode.removeChild(controlRoot);
+    } catch (e1b) {}
     delete window.__odReplayCleanupV1;
     delete window.__odReplayV1;
   };
   return "ok";
 })()`;
+}
+
+/**
+ * 单元测试用：生成页面注入 IIFE 源码（含可选控制条）。
+ */
+export function testOnly_buildInjectExpression(
+  moveMinMs: number,
+  snapshotMs: number,
+  injectControls: boolean,
+): string {
+  return buildInjectExpression(moveMinMs, snapshotMs, injectControls);
 }

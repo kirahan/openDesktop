@@ -8,7 +8,10 @@ export type ReplayEventType =
   | "pointermove"
   | "pointerdown"
   | "click"
-  | "structure_snapshot";
+  | "structure_snapshot"
+  | "assertion_checkpoint"
+  | "segment_start"
+  | "segment_end";
 
 /** 与页面/服务端约定一致的坐标系：相对视口的 CSS 像素（clientX/Y），附视口宽高。 */
 export type ReplayPointerEventBase = {
@@ -61,11 +64,38 @@ export type ReplayStructureSnapshotEvent = {
   text: string;
 };
 
+/** 用户在页面内控制条触发的「断言检查点」锚点，供 LLM 或后续制品消费 */
+export type ReplayAssertionCheckpointEvent = {
+  schemaVersion: typeof REPLAY_SCHEMA_VERSION;
+  type: "assertion_checkpoint";
+  ts: number;
+  note?: string;
+};
+
+/** 多段连续操作：标记「一段业务操作」的起点（不启停矢量录制） */
+export type ReplaySegmentStartEvent = {
+  schemaVersion: typeof REPLAY_SCHEMA_VERSION;
+  type: "segment_start";
+  ts: number;
+  note?: string;
+};
+
+/** 多段连续操作：标记「一段业务操作」的终点 */
+export type ReplaySegmentEndEvent = {
+  schemaVersion: typeof REPLAY_SCHEMA_VERSION;
+  type: "segment_end";
+  ts: number;
+  note?: string;
+};
+
 export type ReplayEnvelope =
   | ReplayPointerMoveEvent
   | ReplayPointerDownEvent
   | ReplayClickEvent
-  | ReplayStructureSnapshotEvent;
+  | ReplayStructureSnapshotEvent
+  | ReplayAssertionCheckpointEvent
+  | ReplaySegmentStartEvent
+  | ReplaySegmentEndEvent;
 
 function isFiniteNum(n: unknown): n is number {
   return typeof n === "number" && Number.isFinite(n);
@@ -79,6 +109,7 @@ const MAX_CLICK_ROLE = 64;
 const MAX_DATA_KEY_LEN = 64;
 const MAX_DATA_VAL_LEN = 200;
 const MAX_DATA_ENTRIES = 12;
+const MAX_ASSERTION_NOTE = 500;
 
 const DATA_ATTR_KEY = /^data-[a-zA-Z0-9_-]+$/;
 
@@ -158,6 +189,34 @@ export function parseReplayEnvelope(raw: unknown): ReplayEnvelope | null {
       format: "text_digest",
       text,
     };
+  }
+
+  if (t === "assertion_checkpoint") {
+    const out: ReplayAssertionCheckpointEvent = {
+      schemaVersion: REPLAY_SCHEMA_VERSION,
+      type: "assertion_checkpoint",
+      ts,
+    };
+    if (o.note !== undefined) {
+      if (typeof o.note !== "string") return null;
+      const n = clip(o.note, MAX_ASSERTION_NOTE);
+      if (n.length > 0) out.note = n;
+    }
+    return out;
+  }
+
+  if (t === "segment_start" || t === "segment_end") {
+    const out: ReplaySegmentStartEvent | ReplaySegmentEndEvent = {
+      schemaVersion: REPLAY_SCHEMA_VERSION,
+      type: t,
+      ts,
+    };
+    if (o.note !== undefined) {
+      if (typeof o.note !== "string") return null;
+      const n = clip(o.note, MAX_ASSERTION_NOTE);
+      if (n.length > 0) out.note = n;
+    }
+    return out;
   }
 
   if (t === "pointermove" || t === "pointerdown" || t === "click") {
