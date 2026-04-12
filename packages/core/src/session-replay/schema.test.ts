@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { parseReplayEnvelope, parseReplayEnvelopeJsonString, REPLAY_SCHEMA_VERSION } from "./schema.js";
+import {
+  parseReplayClickTarget,
+  parseReplayEnvelope,
+  parseReplayEnvelopeJsonString,
+  REPLAY_SCHEMA_VERSION,
+} from "./schema.js";
 
 describe("parseReplayEnvelope", () => {
   it("accepts pointermove with viewport", () => {
@@ -61,6 +66,70 @@ describe("parseReplayEnvelope", () => {
 
   it("rejects wrong schema version", () => {
     expect(parseReplayEnvelope({ schemaVersion: 99, type: "click", ts: 1, x: 0, y: 0, viewportWidth: 1, viewportHeight: 1 })).toBeNull();
+  });
+
+  it("accepts click with optional target summary", () => {
+    const v = parseReplayEnvelope({
+      schemaVersion: REPLAY_SCHEMA_VERSION,
+      type: "click",
+      ts: 1,
+      x: 1,
+      y: 2,
+      viewportWidth: 100,
+      viewportHeight: 100,
+      target: {
+        tagName: "button",
+        id: "ok",
+        className: "btn primary",
+        data: { "data-testid": "submit" },
+        selector: "div > button#ok",
+        role: "button",
+      },
+    });
+    expect(v?.type).toBe("click");
+    if (v?.type === "click") {
+      expect(v.target?.tagName).toBe("button");
+      expect(v.target?.id).toBe("ok");
+      expect(v.target?.data?.["data-testid"]).toBe("submit");
+    }
+  });
+
+  it("rejects click when target is present but invalid", () => {
+    expect(
+      parseReplayEnvelope({
+        schemaVersion: REPLAY_SCHEMA_VERSION,
+        type: "click",
+        ts: 1,
+        x: 0,
+        y: 0,
+        viewportWidth: 1,
+        viewportHeight: 1,
+        target: { tagName: "" },
+      }),
+    ).toBeNull();
+    expect(
+      parseReplayEnvelope({
+        schemaVersion: REPLAY_SCHEMA_VERSION,
+        type: "click",
+        ts: 1,
+        x: 0,
+        y: 0,
+        viewportWidth: 1,
+        viewportHeight: 1,
+        target: { tagName: "a", data: { "data-x": 123 } },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("parseReplayClickTarget", () => {
+  it("parses minimal target", () => {
+    expect(parseReplayClickTarget({ tagName: "span" })).toEqual({ tagName: "span" });
+  });
+
+  it("rejects non-object", () => {
+    expect(parseReplayClickTarget(null)).toBeNull();
+    expect(parseReplayClickTarget("x")).toBeNull();
   });
 });
 

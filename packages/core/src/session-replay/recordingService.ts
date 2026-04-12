@@ -284,6 +284,72 @@ function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
       vh: document.documentElement.clientHeight
     };
   };
+  var odClip = function(s, n){
+    if (s === undefined || s === null) return "";
+    var t = String(s);
+    return t.length <= n ? t : t.slice(0, n);
+  };
+  var odBuildSelector = function(el, maxDepth, maxLen){
+    var parts = [];
+    var cur = el;
+    var d = 0;
+    while (cur && cur.nodeType === 1 && d < maxDepth) {
+      var tag = (cur.tagName && cur.tagName.toLowerCase()) || "*";
+      if (cur.id) {
+        parts.unshift(tag + "#" + odClip(String(cur.id), 180));
+        break;
+      }
+      var cls = "";
+      if (typeof cur.className === "string" && cur.className) {
+        var ft = cur.className.trim().split(/\\s+/)[0];
+        if (ft) cls = "." + odClip(ft, 60);
+      }
+      var parent = cur.parentElement;
+      if (!parent) {
+        parts.unshift(tag + cls);
+        break;
+      }
+      var ix = 0;
+      var kids = parent.children;
+      for (var j = 0; j < kids.length; j++) {
+        if (kids[j].tagName === cur.tagName) {
+          ix++;
+          if (kids[j] === cur) break;
+        }
+      }
+      parts.unshift(tag + cls + ":nth-of-type(" + ix + ")");
+      cur = parent;
+      d++;
+    }
+    return odClip(parts.join(" > "), maxLen);
+  };
+  var odSummarizeClickTarget = function(el){
+    var cur = el;
+    while (cur && cur.nodeType !== 1) cur = cur.parentElement;
+    if (!cur) return { tagName: "unknown" };
+    var tagName = (cur.tagName && cur.tagName.toLowerCase()) || "unknown";
+    var out = { tagName: odClip(tagName, 32) };
+    if (cur.id) out.id = odClip(String(cur.id), 200);
+    if (typeof cur.className === "string" && cur.className) out.className = odClip(cur.className, 240);
+    var ra = cur.getAttribute && cur.getAttribute("role");
+    if (ra) out.role = odClip(String(ra), 64);
+    var data = {};
+    var dk = 0;
+    var attrs = cur.attributes;
+    if (attrs) {
+      for (var i = 0; i < attrs.length && dk < 12; i++) {
+        var nm = attrs[i].name;
+        if (nm.indexOf("data-") !== 0) continue;
+        if (nm.length > 64) continue;
+        if (!/^data-[a-zA-Z0-9_-]+$/.test(nm)) continue;
+        data[nm] = odClip(String(attrs[i].value || ""), 200);
+        dk++;
+      }
+    }
+    if (Object.keys(data).length) out.data = data;
+    out.selector = odBuildSelector(cur, 6, 480);
+    return out;
+  };
   var lastMove = 0;
   var onMove = function(e){
     var n = performance.now();
@@ -315,6 +381,7 @@ function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
   };
   var onClick = function(e){
     var v = vp();
+    var tgt = odSummarizeClickTarget(e.target);
     send(JSON.stringify({
       schemaVersion: 1,
       type: "click",
@@ -322,7 +389,8 @@ function buildInjectExpression(moveMinMs: number, snapshotMs: number): string {
       x: e.clientX,
       y: e.clientY,
       viewportWidth: v.vw,
-      viewportHeight: v.vh
+      viewportHeight: v.vh,
+      target: tgt
     }));
   };
   document.addEventListener("pointermove", onMove, true);

@@ -89,6 +89,28 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 }
 ```
 
+`click` 事件可带可选字段 `target`，为点击目标节点的有限摘要（标签、`id`、`className`、若干 `data-*`、简化 `selector`、`role`），便于区分点了哪个元素；字段长度与条数在 Core 解析侧有上限。
+
+```json
+{
+  "schemaVersion": 1,
+  "type": "click",
+  "ts": 1712812800000,
+  "x": 120.5,
+  "y": 64,
+  "viewportWidth": 1280,
+  "viewportHeight": 720,
+  "target": {
+    "tagName": "button",
+    "id": "submit",
+    "className": "btn primary",
+    "data": { "data-testid": "ok" },
+    "selector": "main > form > button#submit",
+    "role": "button"
+  }
+}
+```
+
 **rrweb 与隐私默认值**：注入包内 `rrweb.record` 使用 **`maskAllInputs: true`**（输入类控件内容打码）；仍可能包含 URL、标题与 DOM 结构，请按合规要求使用。
 
 **本地转发代理与目标应用**：已注册应用开启 **专用代理** 时，启动流程会注入 `HTTP_PROXY`/`HTTPS_PROXY`。若目标应用忽略环境变量，可能导致 `proxy/stream` 无事件。详见根目录 [README](../README.md) 与 [packages/web/README.md](../packages/web/README.md)「本地转发代理」。

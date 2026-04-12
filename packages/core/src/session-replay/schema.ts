@@ -31,8 +31,25 @@ export type ReplayPointerDownEvent = ReplayPointerEventBase & {
   button: number;
 };
 
+/** click 时 e.target 的有限摘要（体积与隐私可控） */
+export type ReplayClickTarget = {
+  /** HTML 标签小写，如 button */
+  tagName: string;
+  id?: string;
+  /** 页面 className 字符串截断 */
+  className?: string;
+  /** data-* 属性，键为 data-foo 形式 */
+  data?: Record<string, string>;
+  /** 自底向上若干层的简化 CSS 路径 */
+  selector?: string;
+  /** 来自 getAttribute("role") */
+  role?: string;
+};
+
 export type ReplayClickEvent = ReplayPointerEventBase & {
   type: "click";
+  /** 可选；旧客户端或无法解析节点时可能缺失 */
+  target?: ReplayClickTarget;
 };
 
 export type ReplayStructureSnapshotEvent = {
@@ -52,6 +69,69 @@ export type ReplayEnvelope =
 
 function isFiniteNum(n: unknown): n is number {
   return typeof n === "number" && Number.isFinite(n);
+}
+
+const MAX_CLICK_TAG = 32;
+const MAX_CLICK_ID = 200;
+const MAX_CLICK_CLASS = 240;
+const MAX_CLICK_SELECTOR = 480;
+const MAX_CLICK_ROLE = 64;
+const MAX_DATA_KEY_LEN = 64;
+const MAX_DATA_VAL_LEN = 200;
+const MAX_DATA_ENTRIES = 12;
+
+const DATA_ATTR_KEY = /^data-[a-zA-Z0-9_-]+$/;
+
+/** 将任意字符串截断到给定最大长度（数字） */
+function clip(s: string, maxLen: number): string {
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen);
+}
+
+/**
+ * 解析注入脚本发来的 `click.target` 摘要；非法结构返回 null（整条 envelope 丢弃）。
+ * @param raw 来自页面的 JSON 对象
+ */
+export function parseReplayClickTarget(raw: unknown): ReplayClickTarget | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const tag = o.tagName;
+  if (typeof tag !== "string" || tag.length === 0) return null;
+  const tagName = clip(tag, MAX_CLICK_TAG);
+  const out: ReplayClickTarget = { tagName };
+
+  if (o.id !== undefined) {
+    if (typeof o.id !== "string") return null;
+    out.id = clip(o.id, MAX_CLICK_ID);
+  }
+  if (o.className !== undefined) {
+    if (typeof o.className !== "string") return null;
+    out.className = clip(o.className, MAX_CLICK_CLASS);
+  }
+  if (o.selector !== undefined) {
+    if (typeof o.selector !== "string") return null;
+    out.selector = clip(o.selector, MAX_CLICK_SELECTOR);
+  }
+  if (o.role !== undefined) {
+    if (typeof o.role !== "string") return null;
+    out.role = clip(o.role, MAX_CLICK_ROLE);
+  }
+  if (o.data !== undefined) {
+    if (o.data === null || typeof o.data !== "object" || Array.isArray(o.data)) return null;
+    const dataIn = o.data as Record<string, unknown>;
+    const dataOut: Record<string, string> = {};
+    let n = 0;
+    for (const [k, v] of Object.entries(dataIn)) {
+      if (n >= MAX_DATA_ENTRIES) break;
+      if (k.length > MAX_DATA_KEY_LEN || !DATA_ATTR_KEY.test(k)) continue;
+      if (typeof v !== "string") return null;
+      dataOut[k] = clip(v, MAX_DATA_VAL_LEN);
+      n++;
+    }
+    if (Object.keys(dataOut).length > 0) out.data = dataOut;
+  }
+
+  return out;
 }
 
 /**
@@ -97,6 +177,11 @@ export function parseReplayEnvelope(raw: unknown): ReplayEnvelope | null {
     if (t === "pointerdown") {
       if (!isFiniteNum(o.button)) return null;
       return { ...base, type: "pointerdown", button: o.button };
+    }
+    if (o.target != null) {
+      const tgt = parseReplayClickTarget(o.target);
+      if (!tgt) return null;
+      return { ...base, type: "click", target: tgt };
     }
     return { ...base, type: "click" };
   }

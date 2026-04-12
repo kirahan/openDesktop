@@ -28,3 +28,8 @@
 
 - [x] 5.1 实现完成后运行 `openspec reconcile` 或按项目流程对账 spec 与代码
   - [x] Test: CI 中现有测试套件通过，新增测试全部绿灯
+
+## 6. 后续补充（归档后合入）
+
+- [x] 6.1 `click` 事件可选 `target` 字段：标签名、`id`、`className`、有限 `data-*`、简化 `selector`、`role`；Core 解析侧长度与键名约束
+  - [x] Test: `parseReplayEnvelope` 与注入脚本路径单测
