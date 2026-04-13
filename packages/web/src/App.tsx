@@ -21,8 +21,13 @@ import { splitReplayLinesBySegmentMarkers } from "./replay/splitReplayLinesBySeg
 import { filterNonStructureReplayLines } from "./replay/structureSnapshotTree.js";
 import { RrwebReplayView } from "./replay/RrwebReplayView.js";
 import { RrwebStreamDiagnostics } from "./replay/rrwebDiagnosticsPanel.js";
+import {
+  nativeAccessibilityAtPointDisabledReason,
+  nativeAccessibilityTreeDisabledReason,
+} from "./nativeAccessibilityObservability.js";
+import { MacAxTreeVisual } from "./macAxTreeVisual.js";
 
-type DetailKind = "list-window" | "metrics" | "snapshot";
+type DetailKind = "list-window" | "metrics" | "snapshot" | "native-a11y" | "native-a11y-point";
 
 const OBS_PALETTE = {
   border: "#d8dee8",
@@ -34,7 +39,12 @@ const OBS_PALETTE = {
   accentTopo: "#2563eb",
   accentMetrics: "#059669",
   accentSnap: "#7c3aed",
+  accentNativeA11y: "#c2410c",
+  accentNativeA11yPoint: "#ea580c",
 };
+
+/** 「指针附近无障碍」面板打开时自动轮询 nut-js 鼠标坐标 + Core 采样间隔（毫秒） */
+const NATIVE_A11Y_POINT_POLL_MS = 3000;
 
 type Session = {
   id: string;
@@ -42,6 +52,10 @@ type Session = {
   state: string;
   createdAt: string;
   cdpPort?: number;
+  /** 子进程 PID（macOS 原生无障碍树等能力依赖） */
+  pid?: number;
+  /** Core 聚合自应用定义 */
+  uiRuntime?: "electron" | "qt";
   allowScriptExecution?: boolean;
 };
 
@@ -53,6 +67,7 @@ type OdApp = {
   cwd: string;
   env: Record<string, string>;
   args: string[];
+  uiRuntime?: "electron" | "qt";
   injectElectronDebugPort: boolean;
   /** 与会话启动时注入进程级 HTTP(S)_PROXY 对应（GET /v1/sessions/.../proxy/stream） */
   useDedicatedProxy?: boolean;
@@ -216,6 +231,20 @@ function IconSnapshot({ color }: { color: string }) {
   );
 }
 
+/** 原生 Accessibility（AX）树 */
+function IconNativeA11y({ color }: { color: string }) {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M12 3c-1.1 0-2 .9-2 2v1H8c-.6 0-1 .4-1 1v2H5c-.6 0-1 .4-1 1v10c0 .6.4 1 1 1h4v-6h4v6h4c.6 0 1-.4 1-1V8c0-.6-.4-1-1-1h-2V7c0-.6-.4-1-1-1h-2V5c0-1.1-.9-2-2-2z"
+        stroke={color}
+        strokeWidth="1.25"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 /** 应用行：启动会话 */
 function IconSessionStart({ color }: { color: string }) {
   return (
@@ -293,22 +322,33 @@ function IconCopied({ color }: { color: string }) {
 
 function ObservActionCards({
   sessionId,
+  sessionUiRuntime,
   loadingKind,
   detailId,
   detailTopo,
   detailMetrics,
   detailSnap,
+  detailNativeA11y,
+  detailNativeA11yPoint,
+  nativeA11yDisabledReason,
+  nativeA11yPointDisabledReason,
   onAction,
 }: {
   sessionId: string;
+  sessionUiRuntime: "electron" | "qt";
   loadingKind: DetailKind | null;
   detailId: string | null;
   detailTopo: string | null;
   detailMetrics: string | null;
   detailSnap: string | null;
+  detailNativeA11y: string | null;
+  detailNativeA11yPoint: string | null;
+  /** 非 null 时禁用「原生无障碍树」并展示原因 */
+  nativeA11yDisabledReason: string | null;
+  nativeA11yPointDisabledReason: string | null;
   onAction: (id: string, kind: DetailKind) => void;
 }) {
-  const rows: {
+  const electronRows: {
     kind: DetailKind;
     title: string;
     hint: string;
@@ -336,7 +376,31 @@ function ObservActionCards({
       Icon: IconSnapshot,
       accent: OBS_PALETTE.accentSnap,
     },
+    {
+      kind: "native-a11y",
+      title: "原生无障碍树",
+      hint: "系统 AX（Qt 等无 CDP 页面）",
+      Icon: IconNativeA11y,
+      accent: OBS_PALETTE.accentNativeA11y,
+    },
   ];
+  const qtRows: (typeof electronRows)[number][] = [
+    {
+      kind: "native-a11y",
+      title: "原生无障碍树",
+      hint: "整棵 AX 子树（可能较大）",
+      Icon: IconNativeA11y,
+      accent: OBS_PALETTE.accentNativeA11y,
+    },
+    {
+      kind: "native-a11y-point",
+      title: "捕获无障碍树（鼠标周围）",
+      hint: "指针屏幕坐标附近局部 AX",
+      Icon: IconNativeA11y,
+      accent: OBS_PALETTE.accentNativeA11yPoint,
+    },
+  ];
+  const rows = sessionUiRuntime === "qt" ? qtRows : electronRows;
 
   const isActive = (kind: DetailKind) => {
     if (detailId !== sessionId) return false;
@@ -344,6 +408,8 @@ function ObservActionCards({
     if (kind === "list-window" && detailTopo) return true;
     if (kind === "metrics" && detailMetrics) return true;
     if (kind === "snapshot" && detailSnap) return true;
+    if (kind === "native-a11y" && detailNativeA11y) return true;
+    if (kind === "native-a11y-point" && detailNativeA11yPoint) return true;
     return false;
   };
 
@@ -355,16 +421,28 @@ function ObservActionCards({
         display: "flex",
         flexWrap: "wrap",
         gap: 8,
-        maxWidth: 420,
+        maxWidth: 560,
       }}
     >
       {rows.map(({ kind, title, hint, Icon, accent }) => {
         const active = isActive(kind);
         const loading = loadingKind === kind && detailId === sessionId;
+        const isNativeTree = kind === "native-a11y";
+        const isNativePoint = kind === "native-a11y-point";
+        const nativeReason = isNativeTree
+          ? nativeA11yDisabledReason
+          : isNativePoint
+            ? nativeA11yPointDisabledReason
+            : null;
+        const cardDisabled = (isNativeTree || isNativePoint) && nativeReason !== null;
+        const hintText =
+          (isNativeTree || isNativePoint) && nativeReason ? nativeReason : hint;
         return (
           <button
             key={kind}
             type="button"
+            disabled={cardDisabled}
+            title={cardDisabled ? nativeReason ?? undefined : undefined}
             onClick={() => onAction(sessionId, kind)}
             style={{
               display: "flex",
@@ -377,7 +455,8 @@ function ObservActionCards({
               border: `1px solid ${active ? accent : OBS_PALETTE.border}`,
               background: active ? OBS_PALETTE.bgActive : OBS_PALETTE.bg,
               boxShadow: active ? `0 1px 0 0 ${accent}33` : "0 1px 2px rgba(15,23,42,0.06)",
-              cursor: "pointer",
+              cursor: cardDisabled ? "not-allowed" : "pointer",
+              opacity: cardDisabled ? 0.55 : 1,
               transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
             }}
             onMouseEnter={(e) => {
@@ -406,7 +485,7 @@ function ObservActionCards({
               )}
             </span>
             <span style={{ fontSize: 11, color: OBS_PALETTE.textMuted, marginTop: 6, lineHeight: 1.35 }}>
-              {hint}
+              {hintText}
             </span>
           </button>
         );
@@ -420,6 +499,8 @@ function detailPanelTitle(kind: DetailKind | null): string {
   if (kind === "list-window") return "窗口列表";
   if (kind === "metrics") return "进程指标";
   if (kind === "snapshot") return "态势快照（OODA）";
+  if (kind === "native-a11y") return "原生无障碍树（AX）";
+  if (kind === "native-a11y-point") return "指针附近无障碍（AX）";
   return "结果";
 }
 
@@ -427,6 +508,8 @@ function detailPanelAccent(kind: DetailKind | null): string {
   if (kind === "list-window") return OBS_PALETTE.accentTopo;
   if (kind === "metrics") return OBS_PALETTE.accentMetrics;
   if (kind === "snapshot") return OBS_PALETTE.accentSnap;
+  if (kind === "native-a11y") return OBS_PALETTE.accentNativeA11y;
+  if (kind === "native-a11y-point") return OBS_PALETTE.accentNativeA11yPoint;
   return "#64748b";
 }
 
@@ -3307,6 +3390,7 @@ function ObservationBody({
     );
   if (kind === "metrics") return <MetricsVisual raw={text} />;
   if (kind === "snapshot") return <SnapshotVisual raw={text} />;
+  if (kind === "native-a11y" || kind === "native-a11y-point") return <MacAxTreeVisual raw={text} />;
   return (
     <pre
       style={{
@@ -3345,6 +3429,7 @@ export function App() {
   const [regArgsJson, setRegArgsJson] = useState("[]");
   const [regInjectCdp, setRegInjectCdp] = useState(true);
   const [regDedicatedProxy, setRegDedicatedProxy] = useState(false);
+  const [regUiRuntime, setRegUiRuntime] = useState<"electron" | "qt">("electron");
   /** 已注册应用 — 用户脚本弹层 */
   const [userScriptAppId, setUserScriptAppId] = useState<string | null>(null);
   const [userScriptList, setUserScriptList] = useState<OdUserScript[]>([]);
@@ -3358,7 +3443,32 @@ export function App() {
   const [detailTopo, setDetailTopo] = useState<string | null>(null);
   const [detailMetrics, setDetailMetrics] = useState<string | null>(null);
   const [detailSnap, setDetailSnap] = useState<string | null>(null);
+  const [detailNativeA11y, setDetailNativeA11y] = useState<string | null>(null);
+  const [detailNativeA11yPoint, setDetailNativeA11yPoint] = useState<string | null>(null);
+  /** 来自 `GET /v1/version`（无需 Bearer），用于是否展示原生无障碍能力 */
+  const [coreCapabilities, setCoreCapabilities] = useState<string[]>([]);
   const [detailLoading, setDetailLoading] = useState<DetailKind | null>(null);
+  /** 为 true 时表示详情区正在展示「指针附近无障碍」，用于定时刷新且不随 JSON 内容变化而抖动 */
+  const nativeA11yPointPanelOpen = useMemo(() => {
+    if (!detailId) return false;
+    if (detailLoading === "native-a11y-point") return true;
+    return (
+      detailNativeA11yPoint !== null &&
+      !detailTopo &&
+      !detailMetrics &&
+      !detailSnap &&
+      !detailNativeA11y &&
+      detailLoading === null
+    );
+  }, [
+    detailId,
+    detailLoading,
+    detailNativeA11yPoint,
+    detailTopo,
+    detailMetrics,
+    detailSnap,
+    detailNativeA11y,
+  ]);
   const [cdpCopiedId, setCdpCopiedId] = useState<string | null>(null);
   /** 会话 ID → 注入用户脚本中 */
   const [userScriptInjectBusy, setUserScriptInjectBusy] = useState<string | null>(null);
@@ -3379,6 +3489,23 @@ export function App() {
     Authorization: `Bearer ${tokenTrimmed}`,
     "Content-Type": "application/json",
   };
+
+  useEffect(() => {
+    const versionPath = apiRoot ? `${apiRoot}/v1/version` : "/v1/version";
+    let cancelled = false;
+    void fetch(versionPath)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((b: { capabilities?: string[] } | null) => {
+        if (cancelled || !b?.capabilities || !Array.isArray(b.capabilities)) return;
+        setCoreCapabilities(b.capabilities);
+      })
+      .catch(() => {
+        if (!cancelled) setCoreCapabilities([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiRoot]);
 
   /** `stopped` 不展示（旧数据/兼容）；`killed` 等其余状态展示 */
   const sessionsVisible = useMemo(
@@ -3518,6 +3645,7 @@ export function App() {
     setRegArgsJson("[]");
     setRegInjectCdp(true);
     setRegDedicatedProxy(false);
+    setRegUiRuntime("electron");
     setRegisterAppOpen(true);
   }
 
@@ -3681,6 +3809,7 @@ export function App() {
         executable: exe,
         args,
         env: {},
+        uiRuntime: regUiRuntime,
         injectElectronDebugPort: regInjectCdp,
         useDedicatedProxy: regDedicatedProxy,
       };
@@ -4209,13 +4338,18 @@ export function App() {
     }
   }
 
-  async function loadDetail(sessionId: string, kind: "list-window" | "metrics" | "snapshot") {
+  async function loadDetail(sessionId: string, kind: DetailKind, options?: { silent?: boolean }) {
+    const silent = Boolean(options?.silent && kind === "native-a11y-point");
     if (!tokenTrimmed) {
       const msg =
         "未填写 token：请先粘贴 Bearer。缺 token 时 Core 会返回 401，而不是你看到的 404。";
-      if (kind === "list-window") setDetailTopo(msg);
-      if (kind === "metrics") setDetailMetrics(msg);
-      if (kind === "snapshot") setDetailSnap(msg);
+      if (!silent) {
+        if (kind === "list-window") setDetailTopo(msg);
+        if (kind === "metrics") setDetailMetrics(msg);
+        if (kind === "snapshot") setDetailSnap(msg);
+        if (kind === "native-a11y") setDetailNativeA11y(msg);
+        if (kind === "native-a11y-point") setDetailNativeA11yPoint(msg);
+      }
       return;
     }
     const path =
@@ -4223,11 +4357,19 @@ export function App() {
         ? `/v1/sessions/${sessionId}/list-window`
         : kind === "metrics"
           ? `/v1/sessions/${sessionId}/metrics`
-          : `/v1/agent/sessions/${sessionId}/snapshot`;
-    setDetailTopo(null);
-    setDetailMetrics(null);
-    setDetailSnap(null);
-    setDetailLoading(kind);
+          : kind === "native-a11y"
+            ? `/v1/sessions/${sessionId}/native-accessibility-tree?maxDepth=12&maxNodes=5000`
+            : kind === "native-a11y-point"
+              ? `/v1/sessions/${sessionId}/native-accessibility-at-point?maxAncestorDepth=8&maxLocalDepth=4&maxNodes=5000`
+              : `/v1/agent/sessions/${sessionId}/snapshot`;
+    if (!silent) {
+      setDetailTopo(null);
+      setDetailMetrics(null);
+      setDetailSnap(null);
+      setDetailNativeA11y(null);
+      setDetailNativeA11yPoint(null);
+      setDetailLoading(kind);
+    }
     setDetailId(sessionId);
     try {
       const res = await fetch(apiUrl(path), { headers });
@@ -4238,15 +4380,34 @@ export function App() {
       if (kind === "list-window") setDetailTopo(pretty);
       if (kind === "metrics") setDetailMetrics(pretty);
       if (kind === "snapshot") setDetailSnap(pretty);
+      if (kind === "native-a11y") setDetailNativeA11y(pretty);
+      if (kind === "native-a11y-point") setDetailNativeA11yPoint(pretty);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (kind === "list-window") setDetailTopo(msg);
       if (kind === "metrics") setDetailMetrics(msg);
       if (kind === "snapshot") setDetailSnap(msg);
+      if (kind === "native-a11y") setDetailNativeA11y(msg);
+      if (kind === "native-a11y-point") setDetailNativeA11yPoint(msg);
     } finally {
-      setDetailLoading(null);
+      if (!silent) setDetailLoading(null);
     }
   }
+
+  const loadDetailRef = useRef(loadDetail);
+  loadDetailRef.current = loadDetail;
+  const detailIdPollRef = useRef<string | null>(null);
+  detailIdPollRef.current = detailId;
+
+  useEffect(() => {
+    if (!tokenTrimmed || !nativeA11yPointPanelOpen || !detailId) return;
+    const sid = detailId;
+    const id = window.setInterval(() => {
+      if (detailIdPollRef.current !== sid) return;
+      void loadDetailRef.current(sid, "native-a11y-point", { silent: true });
+    }, NATIVE_A11Y_POINT_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [tokenTrimmed, nativeA11yPointPanelOpen, detailId]);
 
   return (
     <div
@@ -4497,9 +4658,10 @@ export function App() {
                   }}
                 >
                   <colgroup>
-                    <col style={{ width: "12%" }} />
-                    <col style={{ width: "10%" }} />
-                    <col style={{ width: "28%" }} />
+                    <col style={{ width: "11%" }} />
+                    <col style={{ width: "9%" }} />
+                    <col style={{ width: "64px" }} />
+                    <col style={{ width: "26%" }} />
                     <col style={{ width: "72px" }} />
                     <col style={{ width: "88px" }} />
                     <col style={{ width: "14%" }} />
@@ -4507,7 +4669,7 @@ export function App() {
                   </colgroup>
                   <thead>
                     <tr>
-                      {["ID", "名称", "可执行与工作目录", "CDP 注入", "专用代理", "启动参数", "操作"].map((h) => (
+                      {["ID", "名称", "UI", "可执行与工作目录", "CDP 注入", "专用代理", "启动参数", "操作"].map((h) => (
                         <th
                           key={h}
                           style={{
@@ -4529,7 +4691,7 @@ export function App() {
                     {apps.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={7}
+                          colSpan={8}
                           style={{
                             padding: 20,
                             fontSize: 13,
@@ -4585,6 +4747,17 @@ export function App() {
                               }}
                             >
                               {a.name}
+                            </td>
+                            <td
+                              style={{
+                                padding: "10px 12px",
+                                borderBottom: `1px solid #f1f5f9`,
+                                verticalAlign: "middle",
+                              }}
+                            >
+                              <Badge tone={a.uiRuntime === "qt" ? "amber" : "blue"}>
+                                {a.uiRuntime === "qt" ? "Qt" : "Electron"}
+                              </Badge>
                             </td>
                             <td
                               style={{
@@ -5181,16 +5354,33 @@ export function App() {
                 >
                   <ObservActionCards
                     sessionId={s.id}
+                    sessionUiRuntime={s.uiRuntime ?? "electron"}
                     loadingKind={detailLoading}
                     detailId={detailId}
                     detailTopo={detailTopo}
                     detailMetrics={detailMetrics}
                     detailSnap={detailSnap}
+                    detailNativeA11y={detailNativeA11y}
+                    detailNativeA11yPoint={detailNativeA11yPoint}
+                    nativeA11yDisabledReason={nativeAccessibilityTreeDisabledReason(coreCapabilities, {
+                      state: s.state,
+                      pid: s.pid,
+                    })}
+                    nativeA11yPointDisabledReason={nativeAccessibilityAtPointDisabledReason(coreCapabilities, {
+                      state: s.state,
+                      pid: s.pid,
+                    })}
                     onAction={(id, kind) => void loadDetail(id, kind)}
                   />
                 </td>
               </tr>
-              {detailId === s.id && (detailLoading || detailTopo || detailMetrics || detailSnap) && (
+              {detailId === s.id &&
+                (detailLoading ||
+                  detailTopo ||
+                  detailMetrics ||
+                  detailSnap ||
+                  detailNativeA11y ||
+                  detailNativeA11yPoint) && (
                 <tr>
                   <td colSpan={5} style={{ borderBottom: "1px solid #e8edf4", paddingBottom: 12 }}>
                     {(() => {
@@ -5202,7 +5392,11 @@ export function App() {
                             ? "metrics"
                             : detailSnap
                               ? "snapshot"
-                              : null);
+                              : detailNativeA11y
+                                ? "native-a11y"
+                                : detailNativeA11yPoint
+                                  ? "native-a11y-point"
+                                  : null);
                       return (
                     <div
                       style={{
@@ -5234,6 +5428,11 @@ export function App() {
                           }}
                         />
                         {detailPanelTitle(panelKind)}
+                        {panelKind === "native-a11y-point" && !detailLoading ? (
+                          <span style={{ fontWeight: 400, color: OBS_PALETTE.textMuted, fontSize: 12 }}>
+                            每 {NATIVE_A11Y_POINT_POLL_MS / 1000} 秒自动刷新（使用当前全局鼠标坐标；可先把指针移到目标上再在 Studio 内操作）
+                          </span>
+                        ) : null}
                         {detailLoading && (
                           <span style={{ fontWeight: 400, color: OBS_PALETTE.textMuted, fontSize: 12 }}>
                             加载中…
@@ -5242,7 +5441,13 @@ export function App() {
                       </div>
                       <ObservationBody
                         kind={panelKind}
-                        text={detailTopo ?? detailMetrics ?? detailSnap}
+                        text={
+                          detailTopo ??
+                          detailMetrics ??
+                          detailSnap ??
+                          detailNativeA11y ??
+                          detailNativeA11yPoint
+                        }
                         loading={!!detailLoading}
                         topologySnapshotCtx={
                           panelKind === "list-window" && detailId
@@ -5673,7 +5878,7 @@ export function App() {
                   <button
                     type="button"
                     disabled={registerAppBusy || !tokenTrimmed}
-                    title="由本机 Core 弹出 Windows 系统文件对话框以获取完整路径（请求会阻塞至选完或取消）；选 .lnk 后会自动解析"
+                    title="由本机 Core 弹出系统文件对话框以获取完整路径（Windows：PowerShell；macOS：osascript；请求会阻塞至选完或取消）。Windows 选 .lnk 后会自动解析；macOS 选 .app 时会解析为 Contents/MacOS 下主可执行文件"
                     onClick={() => void pickExecutableViaSystemDialog()}
                     style={{
                       flexShrink: 0,
@@ -5791,6 +5996,19 @@ export function App() {
                     resize: "vertical",
                   }}
                 />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <span style={{ fontSize: 12, color: "#334155" }}>UI 运行时（影响会话观测入口）</span>
+                <select
+                  className="od-input"
+                  disabled={registerAppBusy}
+                  value={regUiRuntime}
+                  onChange={(e) => setRegUiRuntime(e.target.value === "qt" ? "qt" : "electron")}
+                  style={{ maxWidth: 280, fontSize: 13 }}
+                >
+                  <option value="electron">Electron / Chromium（CDP 观测）</option>
+                  <option value="qt">Qt / 原生（以无障碍树观测为主）</option>
+                </select>
               </label>
               <label
                 style={{
