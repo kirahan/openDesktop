@@ -2,11 +2,12 @@
 
 ## Purpose
 
-约定应用注册时的调用名、唯一性校验、短 id 生成，以及 **`yarn oc app create`** 一条命令完成应用加默认 Profile 与可选会话的快乐路径；Web 与 CLI 行为对齐，便于 App-first 使用。
+约定应用注册时的调用名、唯一性校验、短 id 生成，以及 `**yarn oc app create**` 一条命令完成应用加默认 Profile 与可选会话的快乐路径；Web 与 CLI 行为对齐，便于 App-first 使用。
 
 用户可见术语（主路径强调「应用」与「会话」、弱化 Profile）见 `openspec/specs/ux-app-session-terminology/spec.md`。
 
 ## Requirements
+
 ### Requirement: 调用名即 App id 且与 App-first 一致
 
 用户在注册应用时提供的 **应用标识（调用名）** SHALL 作为 Core 中 `AppDefinition.id` 存储；该字符串 SHALL 与 `yarn oc <appId> <子命令>` 中的 `<appId>` 使用同一命名空间与匹配规则。文档与注册界面 MUST 将该字段标注为必填（除非产品明确允许「仅自动生成」流程），并说明其用于命令行 App-first 调用。
@@ -41,7 +42,7 @@
 
 ### Requirement: 快乐路径一次注册默认 Profile 与可选会话
 
-项目 SHALL 通过 **`yarn oc app create`**（或文档化等价入口）在单次用户 invocation 中顺序完成：创建应用、创建**默认** Profile（绑定该 `appId`）、以及可选地创建会话。默认 Profile 的 `id` 命名规则 SHALL 在文档中固定（例如 `{appId}-default`）。若某步返回 409（资源已存在），行为 SHALL 在文档中定义为「跳过并继续」或「失败退出」之一，且须一致实现。
+项目 SHALL 通过 `**yarn oc app create`**（或文档化等价入口）在单次用户 invocation 中顺序完成：创建应用、创建**默认** Profile（绑定该 `appId`）、以及可选地创建会话。默认 Profile 的 `id` 命名规则 SHALL 在文档中固定（例如 `{appId}-default`）。若某步返回 409（资源已存在），行为 SHALL 在文档中定义为「跳过并继续」或「失败退出」之一，且须一致实现。
 
 #### Scenario: 完整链路成功
 
@@ -53,3 +54,20 @@
 - **WHEN** 用户使用关闭「启动会话」的选项执行快乐路径命令
 - **THEN** 应用与默认 Profile 被创建，但不创建新会话
 
+### Requirement: 注册应用时可声明 uiRuntime
+
+在 **`POST /v1/apps`** 创建应用时，客户端 MAY 提供 **`uiRuntime`** 字段（`electron` | `qt`）。当 **未提供** 时，系统 SHALL 采用 **`electron`** 作为默认值，以满足与既有「调用名即 id」等要求的兼容。
+
+#### Scenario: 默认 electron 不破坏快乐路径
+
+- **WHEN** 用户通过 `yarn oc app create` 或 Web 注册且未显式选择 Qt
+- **THEN** 创建成功的应用 SHALL 表现为 `electron` 运行时分类，且 SHALL 满足 `app-register-bootstrap` 中既有唯一性与快乐路径要求
+
+### Requirement: CLI 与 Web 注册路径可对齐 uiRuntime
+
+CLI 与 Web SHALL 在文档化路径中支持将应用标为 **Qt**（例如 Web 下拉框、CLI 可选 flag），以便与 Studio 标签及观测分流一致；若某一路径暂不支持，SHALL 在文档中标注 **限制** 与 **变通**（例如创建后 `PATCH` 更新，若未来支持）。
+
+#### Scenario: Web 可选择 Qt
+
+- **WHEN** 用户在 Web 注册应用并选择 Qt
+- **THEN** `POST /v1/apps` SHALL 携带 `uiRuntime: "qt"` 且成功持久化

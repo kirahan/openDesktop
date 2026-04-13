@@ -5,4 +5,5 @@ packages/opendesktop/web-dist
 .DS_Store
 coverage
 .turbo
+bdd
 packages/opendesktop/*.tgz
