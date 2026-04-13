@@ -49,6 +49,13 @@ describe("createApp HTTP", () => {
     expect(v.body.capabilities).toContain("live_console");
     expect(v.body.capabilities).toContain("page_session_replay");
     expect(v.body.capabilities).toContain("session_replay_rrweb");
+    if (process.platform === "darwin") {
+      expect(v.body.capabilities).toContain("native_accessibility_tree");
+      expect(v.body.capabilities).toContain("native_accessibility_at_point");
+    } else {
+      expect(v.body.capabilities).not.toContain("native_accessibility_tree");
+      expect(v.body.capabilities).not.toContain("native_accessibility_at_point");
+    }
     expect(Array.isArray(v.body.agentActions)).toBe(true);
     expect(v.body.agentActions).toContain("state");
     expect(v.body.agentActions).toContain("get");
@@ -675,5 +682,61 @@ describe("createApp HTTP", () => {
       .set("Authorization", "Bearer t");
     expect(one.status).toBe(200);
     expect(one.body.sessionId).toBe("tr-sess");
+  });
+
+  it("POST /v1/apps rejects invalid uiRuntime", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const res = await request(app)
+      .post("/v1/apps")
+      .set("Authorization", "Bearer t")
+      .send({
+        id: "badui",
+        executable: "/bin/true",
+        cwd: "/",
+        env: {},
+        args: [],
+        uiRuntime: "wasm",
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("GET /v1/sessions includes uiRuntime from linked app", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    await store.ensureDir();
+    await store.writeApps([
+      {
+        id: "qtapp",
+        name: "Qt",
+        executable: "/q",
+        cwd: "/",
+        env: {},
+        args: [],
+        uiRuntime: "qt",
+        injectElectronDebugPort: false,
+      },
+    ]);
+    await store.writeProfiles([
+      {
+        id: "qprof",
+        appId: "qtapp",
+        name: "p",
+        env: {},
+        extraArgs: [],
+      },
+    ]);
+    const manager = new SessionManager(store, dir);
+    manager.testOnly_seedRunningSession("qs", "qprof");
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const res = await request(app).get("/v1/sessions").set("Authorization", "Bearer t");
+    expect(res.status).toBe(200);
+    expect(res.body.sessions).toHaveLength(1);
+    expect(res.body.sessions[0].uiRuntime).toBe("qt");
   });
 });

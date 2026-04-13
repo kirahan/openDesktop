@@ -1,3 +1,5 @@
+import type { UiRuntime } from "../store/types.js";
+
 export type SessionState = "pending" | "starting" | "running" | "killed" | "failed";
 
 export type LogLevel = "error" | "warn" | "info" | "debug";
@@ -6,6 +8,8 @@ export type LogSource = "main" | "preload" | "renderer" | "unknown";
 export interface SessionRecord {
   id: string;
   profileId: string;
+  /** 由关联应用解析；列表/详情接口填充，持久化层可省略 */
+  uiRuntime?: UiRuntime;
   state: SessionState;
   cdpPort?: number;
   /** 本会话为 useDedicatedProxy 应用启动的本地转发代理端口（127.0.0.1） */

@@ -2,6 +2,14 @@ import type { LocalProxyRule } from "../proxy/localProxyTypes.js";
 
 export const STORE_SCHEMA_VERSION = 1;
 
+/** 应用 UI 技术栈，用于 Studio 观测入口分流 */
+export type UiRuntime = "electron" | "qt";
+
+export function normalizeUiRuntime(raw: unknown): UiRuntime {
+  if (raw === "qt") return "qt";
+  return "electron";
+}
+
 export interface AppDefinition {
   id: string;
   name: string;
@@ -11,6 +19,8 @@ export interface AppDefinition {
   env: Record<string, string>;
   /** Extra argv before injected debugging args */
   args: string[];
+  /** Electron / Qt 等；省略时视为 electron */
+  uiRuntime?: UiRuntime;
   /** When true, append --remote-debugging-port <cdpPort> (Electron-style) */
   injectElectronDebugPort: boolean;
   /**

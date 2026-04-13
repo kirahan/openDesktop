@@ -7,7 +7,8 @@ import type { CoreConfig } from "../config.js";
 import { API_VERSION, PACKAGE_VERSION } from "../constants.js";
 import type { SessionManager } from "../session/manager.js";
 import type { JsonFileStore } from "../store/jsonStore.js";
-import type { AppDefinition, ProfileDefinition } from "../store/types.js";
+import type { AppDefinition, ProfileDefinition, UiRuntime } from "../store/types.js";
+import { enrichSessionsWithUiRuntime } from "../store/sessionUiRuntime.js";
 import { runConsoleMessageStream } from "../cdp/browserClient.js";
 import {
   releaseConsoleStream,
@@ -58,8 +59,12 @@ import {
 import { parseUserScriptSource } from "../userScripts/parseUserScriptMetadata.js";
 import { collectScriptBodiesForApp } from "../userScripts/collectScriptBodiesForApp.js";
 import type { UserScriptRecord } from "../userScripts/types.js";
+import { pickDarwinExecutablePath } from "../dialog/pickDarwinExecutablePath.js";
 import { pickWindowsExecutablePath } from "../dialog/pickWindowsExecutablePath.js";
 import { resolveWindowsShortcutFromPath } from "../shortcut/resolveWindowsShortcut.js";
+import { dumpMacAccessibilityTree } from "../nativeAccessibility/macAxTree.js";
+import { dumpMacAccessibilityAtPoint } from "../nativeAccessibility/macAxTreeAtPoint.js";
+import { getGlobalMousePosition } from "../nativeAccessibility/getGlobalMousePosition.js";
 import {
   parseTestRecordingArtifact,
   type TestRecordingPageContext,
@@ -87,6 +92,18 @@ export interface CreateAppResult {
 
 function jsonError(res: Response, status: number, code: string, message: string) {
   res.status(status).json({ error: { code, message } });
+}
+
+function parseUiRuntimeField(raw: unknown): { ok: true; value: UiRuntime } | { ok: false; message: string } {
+  if (raw === undefined) return { ok: true, value: "electron" };
+  if (raw === "electron" || raw === "qt") return { ok: true, value: raw };
+  return { ok: false, message: "uiRuntime must be 'electron' or 'qt'" };
+}
+
+function parsePositiveIntQuery(raw: unknown, fallback: number): number {
+  if (typeof raw !== "string" || !raw.trim()) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 /** CDP HTTP/WebSocket 常由调试器直连，不强制 Bearer；依赖 Core 仅监听本机。 */
@@ -156,6 +173,9 @@ export function createApp(deps: AppDeps): CreateAppResult {
       "live_console",
       "page_session_replay",
       "session_replay_rrweb",
+      ...(process.platform === "darwin"
+        ? (["native_accessibility_tree", "native_accessibility_at_point"] as const)
+        : []),
       ...(config.enableAgentApi ? (["agent", "snapshot"] as const) : []),
       ...(config.enableExtendedLogFields ? (["extended_logs"] as const) : []),
     ];
@@ -199,7 +219,8 @@ export function createApp(deps: AppDeps): CreateAppResult {
   });
 
   v1.post("/pick-executable-path", async (_req, res) => {
-    const result = await pickWindowsExecutablePath();
+    const result =
+      process.platform === "darwin" ? await pickDarwinExecutablePath() : await pickWindowsExecutablePath();
     if ("error" in result) {
       const status = result.error === "PLATFORM_UNSUPPORTED" ? 400 : 422;
       return jsonError(res, status, result.error, result.message);
@@ -229,6 +250,8 @@ export function createApp(deps: AppDeps): CreateAppResult {
     if (data.apps.some((a) => a.id === body.id)) {
       return jsonError(res, 409, "CONFLICT", "App id already exists");
     }
+    const ur = parseUiRuntimeField(body.uiRuntime);
+    if (!ur.ok) return jsonError(res, 400, "VALIDATION_ERROR", ur.message);
     const appDef: AppDefinition = {
       id: body.id,
       name: body.name ?? body.id,
@@ -236,6 +259,7 @@ export function createApp(deps: AppDeps): CreateAppResult {
       cwd: body.cwd ?? process.cwd(),
       env: body.env ?? {},
       args: body.args ?? [],
+      ...(body.uiRuntime !== undefined ? { uiRuntime: ur.value } : {}),
       injectElectronDebugPort: body.injectElectronDebugPort ?? true,
       useDedicatedProxy: body.useDedicatedProxy === true,
       proxyRules: Array.isArray(body.proxyRules) ? body.proxyRules : undefined,
@@ -252,6 +276,12 @@ export function createApp(deps: AppDeps): CreateAppResult {
     const idx = data.apps.findIndex((a) => a.id === appId);
     if (idx < 0) return jsonError(res, 404, "APP_NOT_FOUND", "appId does not exist");
     const cur = data.apps[idx]!;
+    let patchUi: { uiRuntime: UiRuntime } | undefined;
+    if (body.uiRuntime !== undefined) {
+      const ur = parseUiRuntimeField(body.uiRuntime);
+      if (!ur.ok) return jsonError(res, 400, "VALIDATION_ERROR", ur.message);
+      patchUi = { uiRuntime: ur.value };
+    }
     const next: AppDefinition = {
       ...cur,
       ...(typeof body.name === "string" ? { name: body.name } : {}),
@@ -259,6 +289,7 @@ export function createApp(deps: AppDeps): CreateAppResult {
       ...(typeof body.cwd === "string" ? { cwd: body.cwd } : {}),
       ...(body.env !== undefined ? { env: body.env } : {}),
       ...(body.args !== undefined ? { args: body.args } : {}),
+      ...(patchUi ?? {}),
       ...(typeof body.injectElectronDebugPort === "boolean" ? { injectElectronDebugPort: body.injectElectronDebugPort } : {}),
       ...(typeof body.useDedicatedProxy === "boolean" ? { useDedicatedProxy: body.useDedicatedProxy } : {}),
       ...(body.proxyRules !== undefined ? { proxyRules: body.proxyRules } : {}),
@@ -413,8 +444,9 @@ export function createApp(deps: AppDeps): CreateAppResult {
     res.status(201).json({ profile: prof });
   });
 
-  v1.get("/sessions", (_req, res) => {
-    res.json({ sessions: manager.list() });
+  v1.get("/sessions", async (_req, res) => {
+    const sessions = await enrichSessionsWithUiRuntime(store, manager.list());
+    res.json({ sessions });
   });
 
   v1.post("/sessions", async (req, res) => {
@@ -422,7 +454,8 @@ export function createApp(deps: AppDeps): CreateAppResult {
     if (!profileId) return jsonError(res, 400, "VALIDATION_ERROR", "profileId required");
     try {
       const session = await manager.create(profileId);
-      res.status(201).json({ session });
+      const [enriched] = await enrichSessionsWithUiRuntime(store, [session]);
+      res.status(201).json({ session: enriched });
     } catch (e) {
       const err = e as { code?: string; message?: string };
       if (err.code === "PROFILE_NOT_FOUND") return jsonError(res, 404, err.code, err.message ?? "");
@@ -431,10 +464,133 @@ export function createApp(deps: AppDeps): CreateAppResult {
     }
   });
 
-  v1.get("/sessions/:id", (req, res) => {
+  v1.get("/sessions/:id", async (req, res) => {
     const s = manager.get(req.params.id);
     if (!s) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
-    res.json({ session: s });
+    const [enriched] = await enrichSessionsWithUiRuntime(store, [s]);
+    res.json({ session: enriched });
+  });
+
+  /** macOS：按会话子进程 PID 采集系统 Accessibility（AX）UI 树（Qt 等无 CDP 页面）。 */
+  v1.get("/sessions/:sessionId/native-accessibility-tree", async (req, res) => {
+    if (process.platform !== "darwin") {
+      return jsonError(res, 400, "PLATFORM_UNSUPPORTED", "native accessibility tree is only available on macOS");
+    }
+    const sessionId = req.params.sessionId;
+    const s = manager.get(sessionId);
+    if (!s) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (s.state !== "running") {
+      return jsonError(res, 400, "SESSION_NOT_READY", "Session must be running to dump accessibility tree");
+    }
+    if (s.pid === undefined || s.pid === null) {
+      return jsonError(res, 400, "PID_UNAVAILABLE", "Session has no child process pid yet");
+    }
+    const maxDepthRaw = req.query.maxDepth;
+    const maxNodesRaw = req.query.maxNodes;
+    const maxDepth = Math.min(
+      50,
+      Math.max(1, typeof maxDepthRaw === "string" ? Number.parseInt(maxDepthRaw, 10) || 12 : 12),
+    );
+    const maxNodes = Math.min(
+      50_000,
+      Math.max(1, typeof maxNodesRaw === "string" ? Number.parseInt(maxNodesRaw, 10) || 5000 : 5000),
+    );
+    const result = await dumpMacAccessibilityTree(s.pid, { maxDepth, maxNodes });
+    if (!result.ok) {
+      if (result.code === "ACCESSIBILITY_DISABLED") {
+        return jsonError(
+          res,
+          403,
+          "ACCESSIBILITY_DISABLED",
+          result.message ||
+            'Grant "Accessibility" to the terminal or opd binary in System Settings → Privacy & Security.',
+        );
+      }
+      const status = result.code === "PLATFORM_UNSUPPORTED" ? 400 : 422;
+      return jsonError(res, status, result.code, result.message);
+    }
+    res.json({
+      truncated: result.truncated,
+      root: result.root,
+    });
+  });
+
+  /** macOS：按屏幕坐标（或当前鼠标）在会话 PID 对应应用内命中 AX 元素并返回局部子树。 */
+  v1.get("/sessions/:sessionId/native-accessibility-at-point", async (req, res) => {
+    if (process.platform !== "darwin") {
+      return jsonError(
+        res,
+        400,
+        "PLATFORM_UNSUPPORTED",
+        "native accessibility at-point is only available on macOS",
+      );
+    }
+    const sessionId = req.params.sessionId;
+    const s = manager.get(sessionId);
+    if (!s) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (s.state !== "running") {
+      return jsonError(res, 400, "SESSION_NOT_READY", "Session must be running");
+    }
+    if (s.pid === undefined || s.pid === null) {
+      return jsonError(res, 400, "PID_UNAVAILABLE", "Session has no child process pid yet");
+    }
+    const qx = req.query.x;
+    const qy = req.query.y;
+    let screenX: number;
+    let screenY: number;
+    if (typeof qx === "string" && qx.trim() && typeof qy === "string" && qy.trim()) {
+      screenX = Number.parseFloat(qx);
+      screenY = Number.parseFloat(qy);
+      if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) {
+        return jsonError(res, 400, "VALIDATION_ERROR", "x and y must be finite numbers");
+      }
+    } else {
+      const pos = await getGlobalMousePosition();
+      if (!pos.ok) {
+        return jsonError(res, 422, pos.code, pos.message);
+      }
+      screenX = pos.x;
+      screenY = pos.y;
+    }
+    const maxAncestorDepth = Math.min(
+      32,
+      Math.max(0, parsePositiveIntQuery(req.query.maxAncestorDepth, 8)),
+    );
+    const maxLocalDepth = Math.min(
+      50,
+      Math.max(1, parsePositiveIntQuery(req.query.maxLocalDepth, 4)),
+    );
+    const maxNodes = Math.min(
+      50_000,
+      Math.max(1, parsePositiveIntQuery(req.query.maxNodes, 5000)),
+    );
+    const result = await dumpMacAccessibilityAtPoint(s.pid, {
+      screenX,
+      screenY,
+      maxAncestorDepth,
+      maxLocalDepth,
+      maxNodes,
+    });
+    if (!result.ok) {
+      if (result.code === "ACCESSIBILITY_DISABLED") {
+        return jsonError(
+          res,
+          403,
+          "ACCESSIBILITY_DISABLED",
+          result.message ||
+            'Grant "Accessibility" to the terminal or opd binary in System Settings → Privacy & Security.',
+        );
+      }
+      const status = result.code === "PLATFORM_UNSUPPORTED" ? 400 : 422;
+      return jsonError(res, status, result.code, result.message);
+    }
+    res.json({
+      truncated: result.truncated,
+      screenX: result.screenX,
+      screenY: result.screenY,
+      ancestors: result.ancestors,
+      at: result.at,
+    });
   });
 
   v1.post("/sessions/:id/stop", async (req, res) => {
