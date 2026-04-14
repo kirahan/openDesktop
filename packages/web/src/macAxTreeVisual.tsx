@@ -160,7 +160,6 @@ function AxTreeNode({ node, depth }: { node: unknown; depth: number }) {
 
   return (
     <details
-      defaultOpen={depth < 2}
       style={{
         margin: "2px 0",
         marginLeft: depth * 12,
@@ -236,8 +235,8 @@ export function MacAxTreeVisual({ raw }: { raw: string }) {
         </div>
       ) : null}
       {parsed.mode === "atPoint" ? (
-        <div style={{ marginBottom: 10, fontSize: 12, color: PAL.muted }}>
-          屏幕坐标（主屏原点）: ({parsed.screenX}, {parsed.screenY})
+        <div style={{ marginBottom: 10, fontSize: 12, color: PAL.muted, lineHeight: 1.45 }}>
+          屏幕坐标: ({parsed.screenX.toFixed(0)}, {parsed.screenY.toFixed(0)})
         </div>
       ) : null}
       {parsed.mode === "atPoint" && parsed.ancestors.length > 0 ? (
@@ -259,25 +258,36 @@ export function MacAxTreeVisual({ raw }: { raw: string }) {
           </div>
         </div>
       ) : null}
-      <div
-        style={{
-          maxHeight: "min(70vh, 720px)",
-          overflow: "auto",
-          padding: "8px 10px 12px",
-          background: "#fafbfc",
-          borderRadius: 10,
-          border: "1px solid #e2e8f0",
-        }}
-      >
-        {parsed.mode === "root" ? (
+      {parsed.mode === "root" ? (
+        <div
+          style={{
+            maxHeight: "min(70vh, 720px)",
+            overflow: "auto",
+            padding: "8px 10px 12px",
+            background: "#fafbfc",
+            borderRadius: 10,
+            border: "1px solid #e2e8f0",
+          }}
+        >
           <AxTreeNode node={parsed.root} depth={0} />
-        ) : (
-          <>
-            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: "#334155" }}>命中子树</div>
-            <AxTreeNode node={parsed.at} depth={0} />
-          </>
-        )}
-      </div>
+        </div>
+      ) : (
+        <div
+          style={{
+            maxHeight: "min(70vh, 720px)",
+            overflow: "auto",
+            padding: "8px 10px 12px",
+            background: "#fafbfc",
+            borderRadius: 10,
+            border: `1px solid ${PAL.border}`,
+          }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: "#334155" }}>
+            命中子树（指针下 AX）
+          </div>
+          <AxTreeNode node={parsed.at} depth={0} />
+        </div>
+      )}
       <details style={{ marginTop: 12 }}>
         <summary
           style={{

@@ -19,6 +19,25 @@ describe("parseMacAxAtPointStdout", () => {
       expect(r.screenY).toBe(20);
       expect(r.ancestors).toHaveLength(1);
       expect(r.at).toEqual({ role: "AXButton", title: "OK" });
+      expect(r.hitFrame).toBeUndefined();
+    }
+  });
+
+  it("parses success payload with hitFrame", () => {
+    const r = parseMacAxAtPointStdout(
+      JSON.stringify({
+        ok: true,
+        truncated: false,
+        screenX: 1,
+        screenY: 2,
+        ancestors: [],
+        at: { role: "AXButton", title: "OK" },
+        hitFrame: { x: 10, y: 20, width: 100, height: 40 },
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.hitFrame).toEqual({ x: 10, y: 20, width: 100, height: 40 });
     }
   });
 

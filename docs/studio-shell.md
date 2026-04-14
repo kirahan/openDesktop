@@ -60,6 +60,15 @@ yarn electron:dev
 
 在 Electron 内，「选择可执行文件」**优先**使用 **Electron 原生** `dialog.showOpenDialog`（不经由 Core 的 pick-executable HTTP）；提交注册仍走 **`POST /v1/apps`**。
 
+### Qt 会话：屏幕十字线 + AX「指针附近」树（仅 macOS）
+
+Electron **preload** 可选暴露：
+
+- `startQtAxOverlay()` / `stopQtAxOverlay()`：主进程创建**全屏透明** `BrowserWindow`（初始覆盖**指针所在显示器**，轮询中随 `screen.getDisplayNearestPoint` 移动/缩放以支持多显示器）；macOS 上 `setAlwaysOnTop(true, 'screen-saver')` + `setVisibleOnAllWorkspaces` 尽量保证十字线叠在 Qt 之上；`setIgnoreMouseEvents(true, { forward: true })` 使点击穿透至下层 Qt；主进程以约 **100ms** 轮询 `screen.getCursorScreenPoint()`，向 Studio 渲染进程发送 **`od:qt-ax-cursor`**（屏幕像素坐标，与 **`GET /v1/sessions/:id/native-accessibility-at-point?x=&y=`** 同源）。
+- `subscribeQtAxCursor(cb)`：订阅上述坐标（返回取消函数）。
+
+覆盖层页面仅绘制**十字线 + 圆点**，**不**绘制控件矩形（与 OpenSpec `studio-qt-ax-cursor-overlay` 一致）。外置浏览器无此 API，Studio 仍走 nut-js 轮询路径。
+
 ## 3. 生产打包（占位）
 
 使用 `electron-builder` 将 Core **`dist`**、Web **`dist`** 与壳一并打包、签名等，可在后续变更中补充。打包后 **`app.isPackaged === true`**：Electron 加载 **Core 提供的 HTTP 根路径**上的静态 Web，**不再**内嵌 Vite 开发服（见上文「开发 vs 生产」表）。

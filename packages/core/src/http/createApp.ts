@@ -640,6 +640,7 @@ export function createApp(deps: AppDeps): CreateAppResult {
       screenY: result.screenY,
       ancestors: result.ancestors,
       at: result.at,
+      ...(result.hitFrame ? { hitFrame: result.hitFrame } : {}),
     });
   });
 

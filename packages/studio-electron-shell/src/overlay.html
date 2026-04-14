@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <title>OpenDesktop AX overlay</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: transparent;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="od-ax-overlay-canvas" aria-hidden="true"></canvas>
+    <script>
+      const canvas = document.getElementById("od-ax-overlay-canvas");
+      const ctx = canvas.getContext("2d");
+      function layout() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+      }
+      /**
+       * @param {{ x: number; y: number; highlight?: { x: number; y: number; width: number; height: number } | null }} pos
+       */
+      function drawCrosshair(pos) {
+        var x = pos.x;
+        var y = pos.y;
+        var hl = pos.highlight;
+        layout();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        if (
+          hl &&
+          Number.isFinite(hl.x) &&
+          Number.isFinite(hl.y) &&
+          Number.isFinite(hl.width) &&
+          Number.isFinite(hl.height) &&
+          hl.width > 0 &&
+          hl.height > 0
+        ) {
+          ctx.strokeStyle = "rgba(244, 63, 94, 0.95)";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([6, 4]);
+          ctx.strokeRect(hl.x + 0.5, hl.y + 0.5, hl.width - 1, hl.height - 1);
+          ctx.setLineDash([]);
+          ctx.fillStyle = "rgba(244, 63, 94, 0.12)";
+          ctx.fillRect(hl.x, hl.y, hl.width, hl.height);
+        }
+        ctx.strokeStyle = "rgba(244, 63, 94, 0.92)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+        ctx.fillStyle = "rgba(244, 63, 94, 0.35)";
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      window.addEventListener("resize", function () {
+        layout();
+      });
+      layout();
+      if (window.__OD_OVERLAY__ && typeof window.__OD_OVERLAY__.subscribePosition === "function") {
+        window.__OD_OVERLAY__.subscribePosition(function (pos) {
+          drawCrosshair(pos);
+        });
+      }
+    </script>
+  </body>
+</html>

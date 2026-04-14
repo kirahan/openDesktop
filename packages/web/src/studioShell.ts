@@ -9,6 +9,15 @@ export type OdShellElectron = {
   /** 主进程读取 Core `token.txt`，供壳内自动填 Bearer */
   getCoreBearerToken: () => Promise<string | null>;
   pickExecutableFile: () => Promise<string | null>;
+  /** 可选：Qt AX 全屏透明十字线（仅 macOS 主进程实现） */
+  startQtAxOverlay?: () => Promise<{ ok: boolean; error?: string }>;
+  stopQtAxOverlay?: () => Promise<{ ok?: boolean } | void>;
+  /** @returns 取消订阅 */
+  subscribeQtAxCursor?: (cb: (pos: { x: number; y: number }) => void) => () => void;
+  /** 将 Core `hitFrame` 同步到主进程，在透明层上叠 Qt 控件矩形（全局像素坐标）；传 `null` 清除 */
+  setQtAxHitHighlight?: (
+    rect: null | { x: number; y: number; width: number; height: number },
+  ) => Promise<{ ok?: boolean; error?: string } | void>;
 };
 
 declare global {

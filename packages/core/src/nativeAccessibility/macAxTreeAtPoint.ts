@@ -7,6 +7,14 @@ export const AX_AT_POINT_SWIFT_SCRIPT = path.join(
   fileURLToPath(new URL("../../native-macos/axTreeAtPoint.swift", import.meta.url)),
 );
 
+/** 与 Electron `screen` 一致的全局像素坐标（命中 AX 元素的 frame）。 */
+export type MacAxHitFrameElectron = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 export type MacAxAtPointOk = {
   ok: true;
   truncated: boolean;
@@ -14,6 +22,7 @@ export type MacAxAtPointOk = {
   screenY: number;
   ancestors: unknown[];
   at: unknown;
+  hitFrame?: MacAxHitFrameElectron;
 };
 
 export type MacAxAtPointErr = { ok: false; code: string; message: string; truncated?: boolean };
@@ -29,6 +38,19 @@ export function parseMacAxAtPointStdout(raw: string): MacAxAtPointResult {
   try {
     const j = JSON.parse(t) as Record<string, unknown>;
     if (j.ok === true && j.at != null && typeof j.screenX === "number" && typeof j.screenY === "number") {
+      const hf = j.hitFrame;
+      let hitFrame: MacAxHitFrameElectron | undefined;
+      if (
+        hf != null &&
+        typeof hf === "object" &&
+        typeof (hf as { x?: unknown }).x === "number" &&
+        typeof (hf as { y?: unknown }).y === "number" &&
+        typeof (hf as { width?: unknown }).width === "number" &&
+        typeof (hf as { height?: unknown }).height === "number"
+      ) {
+        const o = hf as MacAxHitFrameElectron;
+        hitFrame = { x: o.x, y: o.y, width: o.width, height: o.height };
+      }
       return {
         ok: true,
         truncated: Boolean(j.truncated),
@@ -36,6 +58,7 @@ export function parseMacAxAtPointStdout(raw: string): MacAxAtPointResult {
         screenY: j.screenY,
         ancestors: Array.isArray(j.ancestors) ? j.ancestors : [],
         at: j.at,
+        ...(hitFrame ? { hitFrame } : {}),
       };
     }
     if (j.ok === false && typeof j.code === "string" && typeof j.message === "string") {

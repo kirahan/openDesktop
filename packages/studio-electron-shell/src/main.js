@@ -18,8 +18,8 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { app, BrowserWindow, dialog, ipcMain, screen } from "electron";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** `packages/studio-electron-shell` 根目录 */
@@ -64,6 +64,34 @@ let viteDevChild = null;
 /** @type {number} */
 let corePort = Number.isFinite(DEFAULT_PORT) ? DEFAULT_PORT : 8787;
 let quitAfterCleanup = false;
+
+/** Studio 主 BrowserWindow（用于向渲染进程转发屏幕指针坐标） */
+/** @type {BrowserWindow | null} */
+let studioShellMainWindow = null;
+/** 全屏透明十字线覆盖层 */
+/** @type {BrowserWindow | null} */
+let qtAxOverlayWindow = null;
+/** @type {ReturnType<typeof setInterval> | null} */
+let qtAxCursorInterval = null;
+/** Core `hitFrame`（Electron 全局坐标），由渲染进程在 at-point 轮询成功后回传 */
+/** @type {{ x: number; y: number; width: number; height: number } | null} */
+let qtAxLastHitFrameGlobal = null;
+
+function stopQtAxOverlayInternal() {
+  if (qtAxCursorInterval) {
+    clearInterval(qtAxCursorInterval);
+    qtAxCursorInterval = null;
+  }
+  qtAxLastHitFrameGlobal = null;
+  if (qtAxOverlayWindow && !qtAxOverlayWindow.isDestroyed()) {
+    try {
+      qtAxOverlayWindow.close();
+    } catch {
+      /* ignore */
+    }
+  }
+  qtAxOverlayWindow = null;
+}
 
 /** 供 Core `core start --web-dist` 使用；与 Electron 窗口在开发态默认加载 Vite 无关（见文件头说明）。 */
 function resolveWebDist() {
@@ -379,6 +407,161 @@ function registerIpc() {
     if (canceled || !filePaths?.length) return null;
     return filePaths[0];
   });
+
+  ipcMain.handle("od:qt-ax-overlay-set-highlight", async (_event, rect) => {
+    if (rect == null) {
+      qtAxLastHitFrameGlobal = null;
+      return { ok: true };
+    }
+    if (
+      typeof rect === "object" &&
+      typeof rect.x === "number" &&
+      typeof rect.y === "number" &&
+      typeof rect.width === "number" &&
+      typeof rect.height === "number" &&
+      Number.isFinite(rect.x) &&
+      Number.isFinite(rect.y) &&
+      Number.isFinite(rect.width) &&
+      Number.isFinite(rect.height) &&
+      rect.width >= 0 &&
+      rect.height >= 0
+    ) {
+      qtAxLastHitFrameGlobal = {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      };
+      return { ok: true };
+    }
+    qtAxLastHitFrameGlobal = null;
+    return { ok: false, error: "INVALID_RECT" };
+  });
+
+  /**
+   * Qt 会话 AX 捕获：主屏全屏透明层 + 主进程轮询 `screen.getCursorScreenPoint()`，
+   * 与 `GET .../native-accessibility-at-point?x=&y=` 使用同一屏幕坐标系。
+   * @see docs/studio-shell.md
+   */
+  ipcMain.handle("od:qt-ax-overlay-start", async () => {
+    if (process.platform !== "darwin") {
+      return { ok: false, error: "屏幕十字线覆盖层仅支持 macOS" };
+    }
+    if (qtAxOverlayWindow && !qtAxOverlayWindow.isDestroyed()) {
+      return { ok: true };
+    }
+    if (!studioShellMainWindow || studioShellMainWindow.isDestroyed()) {
+      return { ok: false, error: "主窗口未就绪" };
+    }
+    const p0 = screen.getCursorScreenPoint();
+    const { x: bx, y: by, width, height } = screen.getDisplayNearestPoint(p0).bounds;
+    qtAxOverlayWindow = new BrowserWindow({
+      x: bx,
+      y: by,
+      width,
+      height,
+      frame: false,
+      transparent: true,
+      backgroundColor: "#00000000",
+      hasShadow: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      focusable: false,
+      show: false,
+      webPreferences: {
+        preload: path.join(__dirname, "overlay-preload.cjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
+    try {
+      qtAxOverlayWindow.setBackgroundColor("#00000000");
+    } catch {
+      /* ignore */
+    }
+    if (process.platform === "darwin") {
+      try {
+        qtAxOverlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      } catch {
+        /* ignore */
+      }
+      try {
+        qtAxOverlayWindow.setAlwaysOnTop(true, "screen-saver");
+      } catch {
+        qtAxOverlayWindow.setAlwaysOnTop(true);
+      }
+    } else {
+      qtAxOverlayWindow.setAlwaysOnTop(true);
+    }
+    const overlayHtml = path.join(__dirname, "overlay.html");
+    await qtAxOverlayWindow.loadURL(pathToFileURL(overlayHtml).href);
+    qtAxOverlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    qtAxOverlayWindow.showInactive();
+
+    /** 略快于十字线，便于指针移出控件后尽快清掉旧矩形（不依赖 Core 下一轮响应）。 */
+    const pollMs = 50;
+    qtAxCursorInterval = setInterval(() => {
+      if (!studioShellMainWindow || studioShellMainWindow.isDestroyed()) {
+        stopQtAxOverlayInternal();
+        return;
+      }
+      if (!qtAxOverlayWindow || qtAxOverlayWindow.isDestroyed()) {
+        stopQtAxOverlayInternal();
+        return;
+      }
+      const p = screen.getCursorScreenPoint();
+      const nb = screen.getDisplayNearestPoint(p).bounds;
+      const cur = qtAxOverlayWindow.getBounds();
+      if (cur.x !== nb.x || cur.y !== nb.y || cur.width !== nb.width || cur.height !== nb.height) {
+        qtAxOverlayWindow.setBounds(nb);
+      }
+      const b = qtAxOverlayWindow.getBounds();
+      const lx = p.x - b.x;
+      const ly = p.y - b.y;
+      /** 若指针已离开上一帧的 hit 矩形，立即丢弃缓存，避免「人走了矩形还在」的滞后感（新矩形仍等 IPC）。 */
+      const gPrev = qtAxLastHitFrameGlobal;
+      if (
+        gPrev &&
+        Number.isFinite(gPrev.x) &&
+        Number.isFinite(gPrev.y) &&
+        Number.isFinite(gPrev.width) &&
+        Number.isFinite(gPrev.height) &&
+        gPrev.width > 0 &&
+        gPrev.height > 0
+      ) {
+        const margin = 4;
+        const inside =
+          p.x >= gPrev.x - margin &&
+          p.x <= gPrev.x + gPrev.width + margin &&
+          p.y >= gPrev.y - margin &&
+          p.y <= gPrev.y + gPrev.height + margin;
+        if (!inside) {
+          qtAxLastHitFrameGlobal = null;
+        }
+      }
+      /** @type {{ x: number; y: number; width: number; height: number } | null} */
+      let highlight = null;
+      const g = qtAxLastHitFrameGlobal;
+      if (g && Number.isFinite(g.x) && Number.isFinite(g.y)) {
+        highlight = {
+          x: g.x - b.x,
+          y: g.y - b.y,
+          width: g.width,
+          height: g.height,
+        };
+      }
+      qtAxOverlayWindow.webContents.send("od-overlay-draw", { x: lx, y: ly, highlight });
+      studioShellMainWindow.webContents.send("od:qt-ax-cursor", { x: p.x, y: p.y });
+    }, pollMs);
+
+    return { ok: true };
+  });
+
+  ipcMain.handle("od:qt-ax-overlay-stop", async () => {
+    stopQtAxOverlayInternal();
+    return { ok: true };
+  });
 }
 
 async function createWindow() {
@@ -391,6 +574,11 @@ async function createWindow() {
       nodeIntegration: false,
       sandbox: false,
     },
+  });
+  studioShellMainWindow = win;
+  win.on("closed", () => {
+    stopQtAxOverlayInternal();
+    studioShellMainWindow = null;
   });
 
   try {
@@ -439,6 +627,7 @@ if (!gotLock) {
     if (!hasCore && !hasVite) return;
     e.preventDefault();
     quitAfterCleanup = true;
+    stopQtAxOverlayInternal();
     void Promise.all([killCoreChild(), killViteDevChild()]).finally(() => {
       app.quit();
     });

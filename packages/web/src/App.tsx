@@ -26,6 +26,10 @@ import {
   nativeAccessibilityTreeDisabledReason,
 } from "./nativeAccessibilityObservability.js";
 import { MacAxTreeVisual } from "./macAxTreeVisual.js";
+import {
+  buildNativeAccessibilityAtPointPath,
+  QT_AX_SHELL_CURSOR_POLL_MS,
+} from "./nativeA11yAtPointUrl.js";
 import { applyElectronShellBearerTokenPrefillIfEmpty, getElectronShell } from "./studioShell.js";
 
 type DetailKind = "list-window" | "metrics" | "snapshot" | "native-a11y" | "native-a11y-point";
@@ -44,8 +48,15 @@ const OBS_PALETTE = {
   accentNativeA11yPoint: "#ea580c",
 };
 
-/** 「指针附近无障碍」面板打开时自动轮询 nut-js 鼠标坐标 + Core 采样间隔（毫秒） */
+/** 「指针附近无障碍」面板打开时自动轮询 nut-js 鼠标坐标 + Core 采样间隔（毫秒）（未开启壳十字线时） */
 const NATIVE_A11Y_POINT_POLL_MS = 3000;
+
+function isLikelyDarwinPlatform(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const p = navigator.platform ?? "";
+  const ua = navigator.userAgent ?? "";
+  return p.toLowerCase().includes("mac") || /Mac OS X|iPhone|iPad/i.test(ua);
+}
 
 type Session = {
   id: string;
@@ -3507,6 +3518,19 @@ export function App() {
   const [domPickBusy, setDomPickBusy] = useState<string | null>(null);
   /** `sessionId::targetId` → 拾取结果或错误 */
   const [domPickHint, setDomPickHint] = useState<Record<string, string>>({});
+  /** Electron 壳：全屏十字线 + 与 at-point 同源的屏幕坐标（仅 Qt + 指针面板） */
+  const [qtAxShellCaptureOn, setQtAxShellCaptureOn] = useState(false);
+  const qtAxShellCaptureOnRef = useRef(false);
+  const qtAxCursorRef = useRef<{ x: number; y: number } | null>(null);
+  const qtAxCursorUnsubRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    qtAxShellCaptureOnRef.current = qtAxShellCaptureOn;
+  }, [qtAxShellCaptureOn]);
+
+  const detailSession = useMemo(
+    () => (detailId ? sessions.find((s) => s.id === detailId) : undefined),
+    [sessions, detailId],
+  );
 
   const apiRoot = resolveApiRoot(base);
   const sessionsUrl = apiRoot ? `${apiRoot}/v1/sessions` : "/v1/sessions";
@@ -4407,6 +4431,41 @@ export function App() {
     }
   }
 
+  const enableQtAxShellCapture = useCallback(async () => {
+    const sh = getElectronShell();
+    if (!sh?.startQtAxOverlay || !sh.subscribeQtAxCursor) {
+      setErr("需要 Electron 壳且 preload 包含 startQtAxOverlay / subscribeQtAxCursor。");
+      return;
+    }
+    if (!isLikelyDarwinPlatform()) {
+      setErr("屏幕十字线覆盖层仅支持 macOS。");
+      return;
+    }
+    setErr(null);
+    try {
+      const res = (await sh.startQtAxOverlay()) as { ok?: boolean; error?: string };
+      if (!res?.ok) {
+        throw new Error(res?.error ?? "启动失败");
+      }
+      qtAxCursorUnsubRef.current?.();
+      qtAxCursorUnsubRef.current = sh.subscribeQtAxCursor((p) => {
+        qtAxCursorRef.current = p;
+      });
+      setQtAxShellCaptureOn(true);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  const disableQtAxShellCapture = useCallback(() => {
+    qtAxCursorUnsubRef.current?.();
+    qtAxCursorUnsubRef.current = null;
+    qtAxCursorRef.current = null;
+    void getElectronShell()?.setQtAxHitHighlight?.(null);
+    void getElectronShell()?.stopQtAxOverlay?.();
+    setQtAxShellCaptureOn(false);
+  }, []);
+
   async function loadDetail(sessionId: string, kind: DetailKind, options?: { silent?: boolean }) {
     const silent = Boolean(options?.silent && kind === "native-a11y-point");
     if (!tokenTrimmed) {
@@ -4429,7 +4488,12 @@ export function App() {
           : kind === "native-a11y"
             ? `/v1/sessions/${sessionId}/native-accessibility-tree?maxDepth=12&maxNodes=5000`
             : kind === "native-a11y-point"
-              ? `/v1/sessions/${sessionId}/native-accessibility-at-point?maxAncestorDepth=8&maxLocalDepth=4&maxNodes=5000`
+              ? buildNativeAccessibilityAtPointPath(
+                  sessionId,
+                  qtAxShellCaptureOnRef.current && qtAxCursorRef.current
+                    ? { x: qtAxCursorRef.current.x, y: qtAxCursorRef.current.y }
+                    : undefined,
+                )
               : `/v1/agent/sessions/${sessionId}/snapshot`;
     if (!silent) {
       setDetailTopo(null);
@@ -4450,14 +4514,44 @@ export function App() {
       if (kind === "metrics") setDetailMetrics(pretty);
       if (kind === "snapshot") setDetailSnap(pretty);
       if (kind === "native-a11y") setDetailNativeA11y(pretty);
-      if (kind === "native-a11y-point") setDetailNativeA11yPoint(pretty);
+      if (kind === "native-a11y-point") {
+        setDetailNativeA11yPoint(pretty);
+        const sh = getElectronShell();
+        if (qtAxShellCaptureOnRef.current && sh?.setQtAxHitHighlight) {
+          const raw = json as Record<string, unknown>;
+          const hf = raw.hitFrame;
+          if (
+            hf &&
+            typeof hf === "object" &&
+            typeof (hf as { x?: unknown }).x === "number" &&
+            typeof (hf as { y?: unknown }).y === "number" &&
+            typeof (hf as { width?: unknown }).width === "number" &&
+            typeof (hf as { height?: unknown }).height === "number"
+          ) {
+            void sh.setQtAxHitHighlight({
+              x: (hf as { x: number }).x,
+              y: (hf as { y: number }).y,
+              width: (hf as { width: number }).width,
+              height: (hf as { height: number }).height,
+            });
+          } else {
+            void sh.setQtAxHitHighlight(null);
+          }
+        }
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (kind === "list-window") setDetailTopo(msg);
       if (kind === "metrics") setDetailMetrics(msg);
       if (kind === "snapshot") setDetailSnap(msg);
       if (kind === "native-a11y") setDetailNativeA11y(msg);
-      if (kind === "native-a11y-point") setDetailNativeA11yPoint(msg);
+      if (kind === "native-a11y-point") {
+        setDetailNativeA11yPoint(msg);
+        const sh = getElectronShell();
+        if (qtAxShellCaptureOnRef.current && sh?.setQtAxHitHighlight) {
+          void sh.setQtAxHitHighlight(null);
+        }
+      }
     } finally {
       if (!silent) setDetailLoading(null);
     }
@@ -4470,13 +4564,34 @@ export function App() {
 
   useEffect(() => {
     if (!tokenTrimmed || !nativeA11yPointPanelOpen || !detailId) return;
+    if (qtAxShellCaptureOn) return;
     const sid = detailId;
     const id = window.setInterval(() => {
       if (detailIdPollRef.current !== sid) return;
       void loadDetailRef.current(sid, "native-a11y-point", { silent: true });
     }, NATIVE_A11Y_POINT_POLL_MS);
     return () => window.clearInterval(id);
-  }, [tokenTrimmed, nativeA11yPointPanelOpen, detailId]);
+  }, [tokenTrimmed, nativeA11yPointPanelOpen, detailId, qtAxShellCaptureOn]);
+
+  useEffect(() => {
+    if (!tokenTrimmed || !nativeA11yPointPanelOpen || !detailId || !qtAxShellCaptureOn) return;
+    const sid = detailId;
+    const id = window.setInterval(() => {
+      if (detailIdPollRef.current !== sid) return;
+      void loadDetailRef.current(sid, "native-a11y-point", { silent: true });
+    }, QT_AX_SHELL_CURSOR_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [tokenTrimmed, nativeA11yPointPanelOpen, detailId, qtAxShellCaptureOn]);
+
+  useEffect(() => {
+    disableQtAxShellCapture();
+  }, [detailId, disableQtAxShellCapture]);
+
+  useEffect(() => {
+    if (!nativeA11yPointPanelOpen) {
+      disableQtAxShellCapture();
+    }
+  }, [nativeA11yPointPanelOpen, disableQtAxShellCapture]);
 
   return (
     <div
@@ -5559,8 +5674,69 @@ export function App() {
                         />
                         {detailPanelTitle(panelKind)}
                         {panelKind === "native-a11y-point" && !detailLoading ? (
-                          <span style={{ fontWeight: 400, color: OBS_PALETTE.textMuted, fontSize: 12 }}>
-                            每 {NATIVE_A11Y_POINT_POLL_MS / 1000} 秒自动刷新（使用当前全局鼠标坐标；可先把指针移到目标上再在 Studio 内操作）
+                          <span
+                            style={{
+                              fontWeight: 400,
+                              color: OBS_PALETTE.textMuted,
+                              fontSize: 12,
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 10,
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            {detailSession?.uiRuntime === "qt" &&
+                            nativeAccessibilityAtPointDisabledReason(coreCapabilities, {
+                              state: detailSession.state,
+                              pid: detailSession.pid,
+                            }) === null ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    qtAxShellCaptureOn
+                                      ? disableQtAxShellCapture()
+                                      : void enableQtAxShellCapture()
+                                  }
+                                  disabled={
+                                    !getElectronShell()?.startQtAxOverlay ||
+                                    !isLikelyDarwinPlatform()
+                                  }
+                                  title={
+                                    !isLikelyDarwinPlatform()
+                                      ? "仅 macOS"
+                                      : !getElectronShell()?.startQtAxOverlay
+                                        ? "需使用 Electron 壳"
+                                        : qtAxShellCaptureOn
+                                          ? "关闭全屏透明十字线并恢复 nut-js 轮询"
+                                          : "主屏透明层 + 与 at-point 同源的屏幕坐标（无控件矩形）"
+                                  }
+                                  style={{
+                                    fontSize: 11,
+                                    padding: "3px 8px",
+                                    borderRadius: 6,
+                                    border: `1px solid ${OBS_PALETTE.borderActive}`,
+                                    background: qtAxShellCaptureOn ? "#e0f2fe" : "#fff",
+                                    cursor:
+                                      !getElectronShell()?.startQtAxOverlay || !isLikelyDarwinPlatform()
+                                        ? "not-allowed"
+                                        : "pointer",
+                                  }}
+                                >
+                                  {qtAxShellCaptureOn ? "关闭十字线捕获" : "十字线捕获（Electron）"}
+                                </button>
+                                <span>
+                                  {qtAxShellCaptureOn
+                                    ? `显式屏幕坐标，约每 ${QT_AX_SHELL_CURSOR_POLL_MS}ms 刷新树（与覆盖层同源）`
+                                    : `未开启时约每 ${NATIVE_A11Y_POINT_POLL_MS / 1000}s 用 nut-js 读全局鼠标`}
+                                </span>
+                              </>
+                            ) : (
+                              <span>
+                                每 {NATIVE_A11Y_POINT_POLL_MS / 1000} 秒自动刷新（使用当前全局鼠标坐标；可先把指针移到目标上再在
+                                Studio 内操作）
+                              </span>
+                            )}
                           </span>
                         ) : null}
                         {detailLoading && (

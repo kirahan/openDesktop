@@ -1,5 +1,6 @@
 #!/usr/bin/env swift
 import ApplicationServices
+import AppKit
 import Foundation
 
 struct TreeNode: Codable {
@@ -9,6 +10,14 @@ struct TreeNode: Codable {
     var children: [TreeNode]?
 }
 
+/// 与 Electron `screen.getCursorScreenPoint()` / `Display.bounds` 一致的**全局**屏幕坐标（原点左上、y 向下）。
+struct HitFrameElectron: Codable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+}
+
 struct AtPointOk: Codable {
     let ok: Bool
     let truncated: Bool
@@ -16,6 +25,8 @@ struct AtPointOk: Codable {
     let screenY: Double
     let ancestors: [TreeNode]
     let at: TreeNode
+    /// 命中元素 AX frame，转换后与 Electron 屏幕坐标系一致；无法读取时省略。
+    let hitFrame: HitFrameElectron?
 }
 
 struct ErrPayload: Codable {
@@ -115,6 +126,105 @@ func shallowNode(_ el: AXUIElement) -> TreeNode {
     return TreeNode(role: role, title: title, value: value, children: nil)
 }
 
+/// `AXFrame` 为 Quartz 全局坐标（原点左下）；部分宿主只暴露 `AXPosition` + `AXSize`。
+func axQuartzFrame(_ el: AXUIElement) -> CGRect? {
+    var v: CFTypeRef?
+    // `kAXFrameAttribute` 在部分 Swift 脚本环境下不可见，使用标准属性名。
+    guard AXUIElementCopyAttributeValue(el, "AXFrame" as CFString, &v) == .success, let ref = v else {
+        return nil
+    }
+    var rect = CGRect.zero
+    let axVal = ref as! AXValue
+    guard AXValueGetValue(axVal, .cgRect, &rect) else { return nil }
+    return rect
+}
+
+func axQuartzPoint(_ el: AXUIElement) -> CGPoint? {
+    var v: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(el, "AXPosition" as CFString, &v) == .success, let ref = v else { return nil }
+    var p = CGPoint.zero
+    guard AXValueGetValue(ref as! AXValue, .cgPoint, &p) else { return nil }
+    return p
+}
+
+func axQuartzSize(_ el: AXUIElement) -> CGSize? {
+    var v: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(el, "AXSize" as CFString, &v) == .success, let ref = v else { return nil }
+    var s = CGSize.zero
+    guard AXValueGetValue(ref as! AXValue, .cgSize, &s) else { return nil }
+    return s
+}
+
+func axQuartzFrameOrCompose(_ el: AXUIElement) -> CGRect? {
+    if let r = axQuartzFrame(el), r.width > 0, r.height > 0 {
+        return r
+    }
+    guard let o = axQuartzPoint(el), let s = axQuartzSize(el), s.width > 0, s.height > 0 else { return nil }
+    return CGRect(origin: o, size: s)
+}
+
+func quartzRectToElectronGlobal(_ r: CGRect) -> HitFrameElectron {
+    let screens = NSScreen.screens
+    guard !screens.isEmpty else {
+        return HitFrameElectron(
+            x: Double(r.minX), y: Double(r.minY), width: Double(r.width), height: Double(r.height))
+    }
+    var vminX = CGFloat.greatestFiniteMagnitude
+    var vmaxY = -CGFloat.greatestFiniteMagnitude
+    for s in screens {
+        let f = s.frame
+        vminX = min(vminX, f.minX)
+        vmaxY = max(vmaxY, f.maxY)
+    }
+    let ex = Double(r.minX - vminX)
+    let ey = Double(vmaxY - r.maxY)
+    return HitFrameElectron(x: ex, y: ey, width: Double(r.width), height: Double(r.height))
+}
+
+/// 多种常见坐标解释；用与 `CopyElementAtPosition` 相同的指针 (screenX, screenY) 做包含判定，选出与 Electron 最一致的一种。
+func hitFrameElectronCandidates(_ r: CGRect) -> [HitFrameElectron] {
+    let screens = NSScreen.screens
+    var vminX = CGFloat.greatestFiniteMagnitude
+    var vmaxY = -CGFloat.greatestFiniteMagnitude
+    for s in screens {
+        let f = s.frame
+        vminX = min(vminX, f.minX)
+        vmaxY = max(vmaxY, f.maxY)
+    }
+    var list: [HitFrameElectron] = []
+    func add(_ h: HitFrameElectron) {
+        if !list.contains(where: {
+            abs($0.x - h.x) < 0.01 && abs($0.y - h.y) < 0.01 && abs($0.width - h.width) < 0.01
+                && abs($0.height - h.height) < 0.01
+        }) {
+            list.append(h)
+        }
+    }
+    add(quartzRectToElectronGlobal(r))
+    add(
+        HitFrameElectron(
+            x: Double(r.minX), y: Double(vmaxY - r.maxY), width: Double(r.width), height: Double(r.height)))
+    add(
+        HitFrameElectron(
+            x: Double(r.minX - vminX), y: Double(r.minY), width: Double(r.width), height: Double(r.height)))
+    add(HitFrameElectron(x: Double(r.minX), y: Double(r.minY), width: Double(r.width), height: Double(r.height)))
+    return list
+}
+
+func pickHitFrame(from r: CGRect, pointerX: Double, pointerY: Double) -> HitFrameElectron? {
+    guard r.width > 0, r.height > 0 else { return nil }
+    let cands = hitFrameElectronCandidates(r)
+    let margin: Double = 6
+    for c in cands {
+        if pointerX >= c.x - margin && pointerX <= c.x + c.width + margin && pointerY >= c.y - margin
+            && pointerY <= c.y + c.height + margin
+        {
+            return c
+        }
+    }
+    return cands.first
+}
+
 // swift path/to/script.swift <pid> <x> <y> <maxAncestorDepth> <maxLocalDepth> <maxNodes>
 // argv[0]=脚本路径，共 7 个元素。
 guard CommandLine.arguments.count >= 7 else {
@@ -211,13 +321,18 @@ guard let atRoot = buildTree(el: hit, depth: 0, maxDepth: maxLocalDepth, maxNode
     exit(0)
 }
 
+let hitFrame: HitFrameElectron? = axQuartzFrameOrCompose(hit).flatMap {
+    pickHitFrame(from: $0, pointerX: screenX, pointerY: screenY)
+}
+
 let ok = AtPointOk(
     ok: true,
     truncated: globalTruncated,
     screenX: screenX,
     screenY: screenY,
     ancestors: ancestors,
-    at: atRoot
+    at: atRoot,
+    hitFrame: hitFrame
 )
 let data = try! JSONEncoder().encode(ok)
 FileHandle.standardOutput.write(data)
