@@ -48,8 +48,8 @@
 | 端点                                                            | 说明                                                                                                 |
 | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `GET /v1/sessions/:id/list-window`                            | 窗口/调试目标列表（归一化 CDP `/json/list`）；`/topology` 为兼容别名                                                  |
-| `GET /v1/sessions/:id/native-accessibility-tree`               | **仅 macOS**：按会话子进程 **PID** 枚举系统 Accessibility（AX）UI 树（Qt 等无 CDP 页面）。Query：`maxDepth`（默认 12，上限 50）、`maxNodes`（默认 5000，上限 50000）。成功：`{ truncated, root }`。须会话 **`running`** 且已有 **`pid`**。 |
-| `GET /v1/sessions/:id/native-accessibility-at-point`          | **仅 macOS**：在**屏幕坐标**处命中该 PID 应用前台的 AX 元素，返回命中节点、**祖先链**与**局部子树**（与整树 JSON 形态兼容）。Query：可选 **`x`** / **`y`**（整数像素）；省略时由 Core 通过 **`@nut-tree/nut-js`** 读取**全局鼠标位置**（失败时 **`400`** `MOUSE_POSITION_UNAVAILABLE`）。另有 `maxAncestorDepth`、`maxLocalDepth`、`maxNodes` 与截断标记。须会话 **`running`** 且已有 **`pid`**；`GET /v1/version` 的 **`capabilities`** 在 darwin 上含 **`native_accessibility_at_point`**。**说明**：显式 **`x`/`y`** 与响应中的命中坐标均为**屏幕像素**；Studio Electron 壳可选在主进程轮询指针并以同坐标调用本接口，**不**在 HTTP 层返回控件几何矩形（无 `kAXFrame` 扩展时 UI 仅可画十字线等锚点，见 `docs/studio-shell.md`）。 |
+| `GET /v1/sessions/:id/native-accessibility-tree`               | **macOS**：按会话 **PID** 枚举 **AX** 整树；**Windows**（实现就绪时）：**UI Automation** 枚举该 PID 顶层窗口子树。Query：`maxDepth`（默认 12，上限 50）、`maxNodes`（默认 5000，上限 50000）。成功：`{ truncated, root }`。须会话 **`running`** 且已有 **`pid`**。不支持的平台：**`400`** `PLATFORM_UNSUPPORTED`。 |
+| `GET /v1/sessions/:id/native-accessibility-at-point`          | **macOS**：屏幕坐标处 **AX** 命中；**Windows**：**UI Automation** `FromPoint`，并校验命中 **`ProcessId`** 与会话 **`pid`**（不一致时 **`HIT_OUTSIDE_SESSION`**）。Query：可选 **`x`** / **`y`**（整数像素）；省略时 darwin 用 **`@nut-tree/nut-js`**，win32 用 **GetCursorPos**（失败时 **`422`** 等，含 **`MOUSE_POSITION_UNAVAILABLE`**）。另有 `maxAncestorDepth`、`maxLocalDepth`、`maxNodes` 与截断。须 **`running`** 且 **`pid`**；能力以 **`GET /v1/version` → `capabilities`** 为准。**说明**：坐标均为**屏幕像素**；Electron 壳可轮询指针与同坐标调用，见 `docs/studio-shell.md`。 |
 | `GET /v1/sessions/:id/metrics`                                | 子进程 CPU/内存；不可得时 `metrics: null` + `reason`                                                         |
 | `GET /v1/sessions/:id/console/stream?targetId=<id>`           | **SSE**：`Runtime.consoleAPICalled`（仅连接后的新日志）。与 Agent `console-messages` **短时采样**互补，**不含 Network**。 |
 | `GET /v1/sessions/:id/network/stream?targetId=<id>`           | **SSE**：请求完成元数据 JSON（无 body）。可选 `stripQuery`、`maxEventsPerSecond`。                                 |
@@ -80,21 +80,24 @@ curl -N -H "Authorization: Bearer $TOKEN" \
   "http://127.0.0.1:8787/v1/sessions/$SESSION/network/stream?targetId=$TARGET"
 ```
 
-`GET /v1/version` 的 `capabilities`、`sseObservabilityStreams` / `sseObservabilityStreamPaths` 可用于探测能力（含 `page_session_replay` / `pageReplay` 与 `session_replay_rrweb` / `rrweb` 路径）。在 **macOS** 上若 Core 已编译并启用对应路径，`capabilities` 中会额外包含 **`native_accessibility_tree`**，以及按点采集能力 **`native_accessibility_at_point`**（与 `.../native-accessibility-at-point` 对应）。
+`GET /v1/version` 的 `capabilities`、`sseObservabilityStreams` / `sseObservabilityStreamPaths` 可用于探测能力（含 `page_session_replay` / `pageReplay` 与 `session_replay_rrweb` / `rrweb` 路径）。在 **macOS** 与 **Windows**（实现就绪时），`capabilities` 可包含 **`native_accessibility_tree`** 与 **`native_accessibility_at_point`**（与上述路由对应）；其它平台不声明或等价不可用。
 
-**`GET .../native-accessibility-tree`（仅 macOS）**
+**`GET .../native-accessibility-tree`**
 
-- **前置**：会话 `running` 且 `pid` 已记录；终端或 `opd` 二进制须在 **系统设置 → 隐私与安全性 → 辅助功能** 中授权，否则常见 **`403`**，错误码 **`ACCESSIBILITY_DISABLED`**。
-- **非 macOS**：**`400`** `PLATFORM_UNSUPPORTED`。
-- **会话不存在**：**`404`** `SESSION_NOT_FOUND`；未运行 / 无 pid：**`400`** `SESSION_NOT_READY` / `PID_UNAVAILABLE`。
-- 其它 AX/ Swift 失败多为 **`422`**，具体见响应 `error.code`（如 `SWIFT_UNAVAILABLE`、`AX_ERROR` 等）。
+- **前置**：会话 `running` 且 `pid` 已记录。
+- **macOS**：终端或 `opd` 须在 **系统设置 → 隐私与安全性 → 辅助功能** 中授权，否则常见 **`403`** **`ACCESSIBILITY_DISABLED`**。其它 AX/Swift 失败多为 **`422`**（如 `SWIFT_UNAVAILABLE` 等）。
+- **Windows**：依赖 **UI Automation** 程序集；加载失败等常见 **`403`** **`ACCESSIBILITY_DISABLED`** 或 **`422`**；无顶层 UIA 元素时可能 **`422`** **`NO_UI_ROOT`**。
+- **不支持的平台**：**`400`** `PLATFORM_UNSUPPORTED`。
+- **会话**：不存在 **`404`**；未运行 / 无 pid：**`400`** `SESSION_NOT_READY` / `PID_UNAVAILABLE`。
 
-**`GET .../native-accessibility-at-point`（仅 macOS）**
+**`GET .../native-accessibility-at-point`**
 
-- **前置**：与整树相同（`running`、`pid`、辅助功能授权）；未授权时同样常见 **`403`** **`ACCESSIBILITY_DISABLED`**。
-- **无 `x`/`y` 时**：依赖 **`@nut-tree/nut-js`** 读取全局鼠标坐标；若读取失败：**`400`** **`MOUSE_POSITION_UNAVAILABLE`**。该依赖在部分环境需满足其自身的运行时/预编译要求，详见 npm 包说明。
-- **非 macOS**：**`400`** `PLATFORM_UNSUPPORTED`；会话 / pid 类错误与整树一致。
-- 成功响应在 **`mode: "at"`** 时含 **`at`**、**`ancestors`**、**`screenX`/`screenY`** 等字段；与 Studio 中「鼠标周围」视图对应。
+- **前置**：`running`、`pid`。
+- **macOS**：辅助功能未授权时常见 **`403`** **`ACCESSIBILITY_DISABLED`**。
+- **Windows**：命中 **`ProcessId`** 与会话 **`pid`** 不一致时 **`422`** **`HIT_OUTSIDE_SESSION`**；UIA 失败见响应 `error.code`。
+- **无 `x`/`y` 时**：darwin 用 **`@nut-tree/nut-js`**；win32 用 **GetCursorPos**；失败时 **`MOUSE_POSITION_UNAVAILABLE`**（HTTP 状态以实现为准，常见 **`422`**）。
+- **不支持的平台**：**`400`** `PLATFORM_UNSUPPORTED`；会话 / pid 类错误与整树一致。
+- 成功响应含 **`at`**、**`ancestors`**、**`screenX`/`screenY`** 等；与 Studio「鼠标周围」视图对应。
 
 **矢量录制事件示例**（`schemaVersion` 为 1；坐标为视口 CSS 像素，附 `viewportWidth` / `viewportHeight`）：
 

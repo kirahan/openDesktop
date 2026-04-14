@@ -64,7 +64,7 @@ yarn electron:dev
 
 **macOS**：使用系统 **Accessibility（AX）**；详见下节 Electron 十字线与 `native-accessibility-at-point` 坐标约定。
 
-**Windows**：Core 通过 **PowerShell 调用 .NET UI Automation**（`native-windows/uia-at-point.ps1`）在屏幕坐标处命中元素，并校验 **`ProcessId` 与会话 `pid` 一致**；若指针下为其它应用则返回 **`HIT_OUTSIDE_SESSION`**。坐标为 **屏幕像素**；多显示器与 DPI 下请与 Electron **`screen.getCursorScreenPoint`** 或显式 `x`/`y` 查询参数保持一致。**整树** `native-accessibility-tree` 在 Windows 上仍可能未实现，以 **`GET /v1/version` → `capabilities`** 为准。
+**Windows**：Core 通过 **PowerShell 调用 .NET UI Automation**（`native-windows/uia-at-point.ps1` 按点、`uia-full-tree.ps1` 整树）在屏幕坐标处命中或枚举顶层窗口子树，并校验 **`ProcessId` 与会话 `pid` 一致**（按点路径下指针命中其它进程则 **`HIT_OUTSIDE_SESSION`**）。未传 `x`/`y` 时 Core 用 **GetCursorPos**（PowerShell 内嵌）读取指针。坐标为 **屏幕像素**；多显示器与 DPI 下请与 Electron **`screen.getCursorScreenPoint`** 或显式查询参数保持一致。**`native_accessibility_tree`** 与 **`native_accessibility_at_point`** 是否在 Windows 可用以 **`GET /v1/version` → `capabilities`** 为准。
 
 ### Qt 会话：Electron 十字线与 AX 指针（macOS 细节）
 

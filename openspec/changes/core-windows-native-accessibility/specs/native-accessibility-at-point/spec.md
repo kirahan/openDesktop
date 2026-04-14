@@ -1,10 +1,17 @@
-# native-accessibility-at-point Specification
+# Delta: native-accessibility-at-point
 
-## Purpose
+## RENAMED Requirements
 
-约定在 **macOS**（Accessibility）与 **Windows**（UI Automation，实现就绪时）上按 **屏幕像素坐标** 在指定应用（会话 **PID**）内命中无障碍元素，并返回 **命中节点、祖先链与局部子树** 的 HTTP 能力；未传显式坐标时 **darwin** 使用 **`@nut-tree/nut-js`**、**win32** 使用 **Win32 GetCursorPos** 语义（经 PowerShell 或文档化等价实现）；与 **`GET /v1/version` → `capabilities`** 及 Studio Qt 观测入口对齐。
+- **FROM:** `### Requirement: 仅 macOS 且会话就绪时提供按点局部 AX 接口`
+- **TO:** `### Requirement: 支持平台且会话就绪时提供按点局部无障碍接口`
 
-## Requirements
+- **FROM:** `### Requirement: 坐标来源与 nut-js 约定`
+- **TO:** `### Requirement: 坐标来源与平台实现约定`
+
+- **FROM:** `### Requirement: 权限与辅助功能失败语义`
+- **TO:** `### Requirement: 权限与无障碍 API 失败语义`
+
+## MODIFIED Requirements
 
 ### Requirement: 支持平台且会话就绪时提供按点局部无障碍接口
 
@@ -38,15 +45,6 @@
 
 - **WHEN** 请求未带显式坐标且 Win32 鼠标读取失败
 - **THEN** 响应 SHALL 返回可机读错误码（如 **`MOUSE_POSITION_UNAVAILABLE`**），且 SHALL NOT 返回 200 局部树
-
-### Requirement: 局部树 JSON 形态与上限
-
-成功响应 SHALL 为 **JSON**，至少包含：**命中节点**、**向上祖先链（受限深度）**、**向下子树（受限深度）**，并与现有整树节点形态 **兼容**（`role` / `title` / `value` / `children` 等字段语义一致）。系统 SHALL 支持查询参数限制 **`maxAncestorDepth`**、**`maxLocalDepth`**、**`maxNodes`**（具备合理默认值与硬上限），并在截断时包含 **`truncated: true`**。
-
-#### Scenario: 截断可辨识
-
-- **WHEN** 局部枚举触及节点或深度上限
-- **THEN** 响应 SHALL 带 `truncated: true` 或文档化等价字段，且 SHALL NOT 静默无限扩展
 
 ### Requirement: 权限与无障碍 API 失败语义
 
