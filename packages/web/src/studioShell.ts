@@ -9,7 +9,7 @@ export type OdShellElectron = {
   /** 主进程读取 Core `token.txt`，供壳内自动填 Bearer */
   getCoreBearerToken: () => Promise<string | null>;
   pickExecutableFile: () => Promise<string | null>;
-  /** 可选：Qt AX 全屏透明十字线（仅 macOS 主进程实现） */
+  /** 可选：Qt 无障碍观测全屏透明十字线（Electron 主进程，macOS 与 Windows） */
   startQtAxOverlay?: () => Promise<{ ok: boolean; error?: string }>;
   stopQtAxOverlay?: () => Promise<{ ok?: boolean } | void>;
   /** @returns 取消订阅 */

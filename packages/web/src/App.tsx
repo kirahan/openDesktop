@@ -528,8 +528,8 @@ function detailPanelTitle(kind: DetailKind | null): string {
   if (kind === "list-window") return "窗口列表";
   if (kind === "metrics") return "进程指标";
   if (kind === "snapshot") return "态势快照（OODA）";
-  if (kind === "native-a11y") return "原生无障碍树（AX）";
-  if (kind === "native-a11y-point") return "指针附近无障碍（AX）";
+  if (kind === "native-a11y") return "原生无障碍树";
+  if (kind === "native-a11y-point") return "指针附近无障碍";
   return "结果";
 }
 

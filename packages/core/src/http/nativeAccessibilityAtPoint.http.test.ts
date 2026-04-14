@@ -194,4 +194,119 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-at-point", () => {
     expect(res.body.error.code).toBe("ACCESSIBILITY_DISABLED");
     spy.mockRestore();
   });
+
+  it("on win32 returns 400 HIT_OUTSIDE_SESSION when dump reports mismatch", async () => {
+    setPlatform("win32");
+    dir = await mkdtemp(path.join(tmpdir(), "od-axpt-win-hit-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    dumpWinMock.mockResolvedValue({
+      ok: false,
+      code: "HIT_OUTSIDE_SESSION",
+      message: "hit process 9 does not match session pid 42",
+    });
+    const spy = vi.spyOn(manager, "get").mockReturnValue({
+      id: "sid",
+      profileId: "p",
+      state: "running",
+      createdAt: new Date().toISOString(),
+      pid: 42,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/native-accessibility-at-point?x=1&y=2")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("HIT_OUTSIDE_SESSION");
+    expect(dumpWinMock).toHaveBeenCalled();
+    expect(dumpMock).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("on win32 returns 422 when no x,y and mouse fails", async () => {
+    setPlatform("win32");
+    dir = await mkdtemp(path.join(tmpdir(), "od-axpt-win-mouse-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    mouseMock.mockResolvedValue({
+      ok: false,
+      code: "MOUSE_POSITION_UNAVAILABLE",
+      message: "GetCursorPos failed",
+    });
+    const spy = vi.spyOn(manager, "get").mockReturnValue({
+      id: "sid",
+      profileId: "p",
+      state: "running",
+      createdAt: new Date().toISOString(),
+      pid: 1,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/native-accessibility-at-point")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe("MOUSE_POSITION_UNAVAILABLE");
+    expect(dumpWinMock).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("on win32 returns 403 when dump reports ACCESSIBILITY_DISABLED", async () => {
+    setPlatform("win32");
+    dir = await mkdtemp(path.join(tmpdir(), "od-axpt-win-a11y-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    dumpWinMock.mockResolvedValue({
+      ok: false,
+      code: "ACCESSIBILITY_DISABLED",
+      message: "UIA load failed",
+    });
+    const spy = vi.spyOn(manager, "get").mockReturnValue({
+      id: "sid",
+      profileId: "p",
+      state: "running",
+      createdAt: new Date().toISOString(),
+      pid: 1,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/native-accessibility-at-point?x=0&y=0")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe("ACCESSIBILITY_DISABLED");
+    spy.mockRestore();
+  });
+
+  it("on win32 returns hitFrame in 200 body when dump includes it", async () => {
+    setPlatform("win32");
+    dir = await mkdtemp(path.join(tmpdir(), "od-axpt-win-frame-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    dumpWinMock.mockResolvedValue({
+      ok: true,
+      truncated: false,
+      screenX: 10,
+      screenY: 20,
+      ancestors: [],
+      at: { role: "button", title: "OK" },
+      hitFrame: { x: 5, y: 6, width: 100, height: 24 },
+    });
+    const spy = vi.spyOn(manager, "get").mockReturnValue({
+      id: "sid",
+      profileId: "p",
+      state: "running",
+      createdAt: new Date().toISOString(),
+      pid: 42,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/native-accessibility-at-point?x=10&y=20")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(200);
+    expect(res.body.hitFrame).toEqual({ x: 5, y: 6, width: 100, height: 24 });
+    spy.mockRestore();
+  });
 });
