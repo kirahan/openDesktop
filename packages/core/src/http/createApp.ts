@@ -25,6 +25,12 @@ import {
   tryAcquireReplaySseStream,
 } from "../session-replay/replaySseLimiter.js";
 import {
+  appendReplaySessionMarker,
+  listReplaySessionMarkers,
+  validateReplayMarkerPayload,
+} from "../session-replay/replayMarkers.js";
+import { executeGlobalShortcutControl } from "./globalShortcutControlPlane.js";
+import {
   emitPageRecordingStudioUiMarker,
   isPageRecordingActive,
   POINTER_MOVE_MIN_INTERVAL_MS,
@@ -1049,6 +1055,24 @@ export function createApp(deps: AppDeps): CreateAppResult {
     }
   });
 
+  /**
+   * 全局快捷键闭集动作控制面：Electron 主进程 / 第三方客户端直连，不依赖 Studio Web。
+   * @see packages/core/src/http/globalShortcutControlPlane.ts
+   */
+  v1.post("/sessions/:sessionId/control/global-shortcut", async (req, res) => {
+    const sessionId = req.params.sessionId;
+    const out = await executeGlobalShortcutControl(manager, sessionId, req.body);
+    if (!out.ok) {
+      return jsonError(res, out.httpStatus, out.code, out.message);
+    }
+    res.status(out.httpStatus).json({
+      ok: true,
+      actionId: out.actionId,
+      sessionId,
+      results: out.results,
+    });
+  });
+
   v1.post("/sessions/:sessionId/replay/recording/start", async (req, res) => {
     const body = req.body as { targetId?: string; injectPageControls?: unknown };
     const targetId = typeof body?.targetId === "string" ? body.targetId.trim() : "";
@@ -1066,9 +1090,11 @@ export function createApp(deps: AppDeps): CreateAppResult {
           ? 404
           : code === "SCRIPT_NOT_ALLOWED"
             ? 403
-            : code === "CDP_NOT_READY" || code === "INJECT_FAILED"
-              ? 503
-              : 500;
+            : code === "PARALLEL_LIMIT_EXCEEDED"
+              ? 409
+              : code === "CDP_NOT_READY" || code === "INJECT_FAILED"
+                ? 503
+                : 500;
       return jsonError(res, status, code, result.error);
     }
     res.json({ ok: true, sessionId, targetId });
@@ -1133,6 +1159,28 @@ export function createApp(deps: AppDeps): CreateAppResult {
       return jsonError(res, status, code, result.error);
     }
     res.json({ ok: true, sessionId, targetId, cmd: cmdRaw });
+  });
+
+  /** 合并时间线上的入点/出点/检查点（MVP：进程内队列；载荷含 mergedTs、scope、可选 targetId）。 */
+  v1.post("/sessions/:sessionId/replay/markers", async (req, res) => {
+    const sessionId = req.params.sessionId;
+    if (!manager.getOpsContext(sessionId)) {
+      return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    }
+    const v = validateReplayMarkerPayload(req.body);
+    if (!v.ok) {
+      return jsonError(res, 400, v.code, v.error);
+    }
+    appendReplaySessionMarker(sessionId, v.value);
+    res.status(201).json({ ok: true, sessionId, marker: v.value });
+  });
+
+  v1.get("/sessions/:sessionId/replay/markers", async (req, res) => {
+    const sessionId = req.params.sessionId;
+    if (!manager.getOpsContext(sessionId)) {
+      return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    }
+    res.json({ ok: true, sessionId, markers: [...listReplaySessionMarkers(sessionId)] });
   });
 
   v1.post("/sessions/:sessionId/test-recording-artifacts", async (req, res) => {

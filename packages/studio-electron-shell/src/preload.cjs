@@ -60,16 +60,8 @@ contextBridge.exposeInMainWorld("__OD_SHELL__", {
     });
   },
   /**
-   * @param {(payload: { actionId: string }) => void} cb
-   * @returns {() => void} 取消订阅
+   * 同步当前选中的会话 ID，供主进程全局快捷键调用 Core 控制面（`POST .../control/global-shortcut`）。
+   * @param {{ sessionId: string | null }} payload
    */
-  onGlobalShortcutAction: (cb) => {
-    if (typeof cb !== "function") return () => {};
-    const handler = (_event, payload) => {
-      console.info("[studio-electron-shell][preload][globalShortcut] 收到 od:global-shortcut", payload);
-      if (payload && typeof payload.actionId === "string") cb({ actionId: payload.actionId });
-    };
-    ipcRenderer.on("od:global-shortcut", handler);
-    return () => ipcRenderer.removeListener("od:global-shortcut", handler);
-  },
+  setStudioSessionContext: (payload) => ipcRenderer.invoke("od:set-studio-session-context", payload ?? {}),
 });

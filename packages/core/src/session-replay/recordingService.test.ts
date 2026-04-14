@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_PARALLEL_PAGE_RECORDINGS_PER_SESSION,
+  countActivePageRecordingsForSession,
   parseReplayUiCommand,
   REPLAY_UI_BINDING_NAME,
+  resetRecordingRegistryForTest,
   testOnly_buildInjectExpression,
+  testOnly_registerStubRecording,
+  wouldExceedParallelRecordingLimit,
 } from "./recordingService.js";
 
 describe("parseReplayUiCommand", () => {
@@ -43,6 +48,28 @@ describe("parseReplayUiCommand", () => {
 
   it("rejects invalid JSON", () => {
     expect(parseReplayUiCommand("{")).toBeNull();
+  });
+});
+
+describe("multi-target parallel recording registry", () => {
+  it("counts active recordings per session", () => {
+    resetRecordingRegistryForTest();
+    testOnly_registerStubRecording("s", "a");
+    testOnly_registerStubRecording("s", "b");
+    testOnly_registerStubRecording("other", "a");
+    expect(countActivePageRecordingsForSession("s")).toBe(2);
+    expect(countActivePageRecordingsForSession("other")).toBe(1);
+    resetRecordingRegistryForTest();
+  });
+
+  it("wouldExceedParallelRecordingLimit when at cap for new target", () => {
+    resetRecordingRegistryForTest();
+    for (let i = 0; i < MAX_PARALLEL_PAGE_RECORDINGS_PER_SESSION; i++) {
+      testOnly_registerStubRecording("sess", `t${i}`);
+    }
+    expect(wouldExceedParallelRecordingLimit("sess", "new-target")).toBe(true);
+    expect(wouldExceedParallelRecordingLimit("sess", "t0")).toBe(false);
+    resetRecordingRegistryForTest();
   });
 });
 

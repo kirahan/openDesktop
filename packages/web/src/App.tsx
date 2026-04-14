@@ -1165,10 +1165,13 @@ function VectorReplayPreview({
 function LiveConsoleDockLayout({
   apiRoot,
   token,
+  studioDetailSessionId,
   children,
 }: {
   apiRoot: string;
   token: string;
+  /** 会话详情当前选中的会话 ID（与观测 Tab 无矢量时仍用于快捷键 session 作用域） */
+  studioDetailSessionId: string | null;
   children: React.ReactNode;
 }) {
   const [tabs, setTabs] = useState<LiveConsoleTabState[]>([]);
@@ -1313,6 +1316,15 @@ function LiveConsoleDockLayout({
               ? `/v1/sessions/${sessionId}/replay/recording/start`
               : `/v1/sessions/${sessionId}/rrweb/recording/start`;
           const startUrl = `${base}${startPath}`;
+          if (streamKind === "replay") {
+            console.info("[openDesktop][replay-stream]", "POST recording/start（页内矢量注入依赖此步成功）", {
+              tabId,
+              sessionId,
+              targetId,
+              startUrl,
+              injectPageControls: true,
+            });
+          }
           const startRes = await fetch(startUrl, {
             method: "POST",
             headers: {
@@ -1333,7 +1345,24 @@ function LiveConsoleDockLayout({
             } catch {
               msg = tx.slice(0, 200);
             }
+            if (streamKind === "replay") {
+              console.warn("[openDesktop][replay-stream]", "recording/start 失败（被测窗口不会出现矢量 UI）", {
+                tabId,
+                sessionId,
+                targetId,
+                httpStatus: startRes.status,
+                bodyPreview: tx.slice(0, 500),
+                message: msg,
+              });
+            }
             throw new Error(msg);
+          }
+          if (streamKind === "replay") {
+            console.info("[openDesktop][replay-stream]", "recording/start 成功，接下来连接 replay SSE", {
+              tabId,
+              sessionId,
+              targetId,
+            });
           }
         }
 
@@ -1349,6 +1378,16 @@ function LiveConsoleDockLayout({
             msg = j.error?.message ?? msg;
           } catch {
             msg = t.slice(0, 200);
+          }
+          if (streamKind === "replay") {
+            console.warn("[openDesktop][replay-stream]", "replay SSE 连接失败（流未建立）", {
+              tabId,
+              sessionId,
+              targetId,
+              sseUrl: url,
+              httpStatus: res.status,
+              bodyPreview: t.slice(0, 400),
+            });
           }
           throw new Error(msg);
         }
@@ -1514,6 +1553,14 @@ function LiveConsoleDockLayout({
         }
       } catch (e) {
         if (!ac.signal.aborted) {
+          if (streamKind === "replay") {
+            console.warn("[openDesktop][replay-stream]", "矢量录制启动或 SSE 读异常", {
+              tabId,
+              sessionId,
+              targetId,
+              err: e instanceof Error ? e.message : String(e),
+            });
+          }
           setTabs((prev) =>
             prev.map((t) =>
               t.id === tabId ? { ...t, err: e instanceof Error ? e.message : String(e) } : t,
@@ -1685,69 +1732,18 @@ function LiveConsoleDockLayout({
   const active = tabs.find((t) => t.id === activeId) ?? null;
   const tokenOk = token.trim().length > 0;
 
-  const handleGlobalShortcutAction = useCallback(
-    (actionId: string) => {
-      const log = (msg: string, extra?: Record<string, unknown>) => {
-        console.info("[openDesktop][global-shortcut][handler]", msg, { actionId, ...extra });
-      };
-      const tok = token.trim();
-      if (!tok) {
-        log("忽略：未填写 Bearer（实时观测抽屉内 token 为空）");
-        return;
-      }
-      const cur = tabsRef.current.find((t) => t.id === activeId) ?? null;
-      if (actionId === "vector-record-toggle") {
-        if (!cur || cur.streamKind !== "replay") {
-          log("忽略：当前观测标签不是「矢量录制」", { activeId, streamKind: cur?.streamKind });
-          return;
-        }
-        if (cur.running) {
-          log("执行：停止矢量录制流", { tabId: cur.id });
-          void stopStream(cur.id);
-        } else {
-          log("执行：启动矢量录制流", { tabId: cur.id, sessionId: cur.sessionId });
-          void startStream(cur.id, cur.sessionId, cur.targetId, "replay");
-        }
-        return;
-      }
-      if (actionId === "segment-start" || actionId === "segment-end" || actionId === "checkpoint") {
-        if (!cur || cur.streamKind !== "replay" || !cur.running) {
-          log("忽略：需要当前标签为矢量录制且录制进行中", {
-            activeId,
-            streamKind: cur?.streamKind,
-            running: cur?.running,
-          });
-          return;
-        }
-        const cmd =
-          actionId === "segment-start"
-            ? "segment_start"
-            : actionId === "segment-end"
-              ? "segment_end"
-              : "checkpoint";
-        const base = apiRoot.replace(/\/$/, "");
-        const url = `${base}/v1/sessions/${encodeURIComponent(cur.sessionId)}/replay/recording/ui-marker`;
-        log("执行：POST ui-marker", { cmd, sessionId: cur.sessionId, targetId: cur.targetId });
-        void fetch(url, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${tok}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ targetId: cur.targetId, cmd }),
-        }).catch(() => undefined);
-        return;
-      }
-      console.info("[openDesktop][global-shortcut][handler] 忽略：未知 actionId", { actionId });
-    },
-    [activeId, apiRoot, token, startStream, stopStream],
-  );
-
+  /** Electron：同步主进程快捷键上下文（矢量 Tab 优先带 targetId） */
   useEffect(() => {
-    const sh = getElectronShell();
-    if (!sh?.onGlobalShortcutAction) return;
-    return sh.onGlobalShortcutAction((p) => handleGlobalShortcutAction(p.actionId));
-  }, [handleGlobalShortcutAction]);
+    const sh = getElectronShell()?.setStudioSessionContext;
+    if (!sh) return;
+    const cur = tabs.find((t) => t.id === activeId) ?? null;
+    if (cur?.streamKind === "replay") {
+      void sh({ sessionId: cur.sessionId, targetId: cur.targetId }).catch(() => undefined);
+    } else {
+      void sh({ sessionId: studioDetailSessionId, targetId: null }).catch(() => undefined);
+    }
+  }, [activeId, tabs, studioDetailSessionId]);
+
   const drawerWide =
     active?.streamKind === "network" ||
     active?.streamKind === "proxy" ||
@@ -4700,7 +4696,11 @@ export function App() {
         }
       `}</style>
 
-      <LiveConsoleDockLayout apiRoot={apiRoot ?? ""} token={tokenTrimmed}>
+      <LiveConsoleDockLayout
+        apiRoot={apiRoot ?? ""}
+        token={tokenTrimmed}
+        studioDetailSessionId={detailId}
+      >
       <div style={{ maxWidth: 920, margin: "0 auto", width: "100%" }}>
         <h1
           style={{

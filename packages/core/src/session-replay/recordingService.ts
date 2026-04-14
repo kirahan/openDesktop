@@ -9,6 +9,7 @@ import {
   createPointerThrottleState,
   throttlePointerMove,
 } from "./pointerThrottle.js";
+import type { ReplayEnvelope } from "./schema.js";
 import { parseReplayEnvelopeJsonString } from "./schema.js";
 
 const BINDING_NAME = "odOpenDesktopReplay";
@@ -95,12 +96,24 @@ class ActiveRecording implements RecordingHandle {
   private readonly cdp: BrowserCdp;
   private readonly flatSessionId: string;
   private readonly registerUiBinding: boolean;
+  private readonly sessionId: string;
+  private readonly targetId: string;
+  /** 本 target 录制流内事件序号，用于合并时间线 tie-break */
+  private eventSeq = 0;
   private closed = false;
 
-  constructor(cdp: BrowserCdp, flatSessionId: string, registerUiBinding: boolean) {
+  constructor(
+    cdp: BrowserCdp,
+    flatSessionId: string,
+    registerUiBinding: boolean,
+    sessionId: string,
+    targetId: string,
+  ) {
     this.cdp = cdp;
     this.flatSessionId = flatSessionId;
     this.registerUiBinding = registerUiBinding;
+    this.sessionId = sessionId;
+    this.targetId = targetId;
   }
 
   /** 向 SSE 推送一条 UI 标记行（检查点 / 段起止），并写入补发缓冲 */
@@ -130,7 +143,18 @@ class ActiveRecording implements RecordingHandle {
     if (typeof note === "string" && note.length > 0) {
       payload.note = note.length > MAX_UI_NOTE_LEN ? note.slice(0, MAX_UI_NOTE_LEN) : note;
     }
-    this.pushUiMarkerLine(JSON.stringify(payload));
+    this.eventSeq += 1;
+    const monoTs = typeof payload.ts === "number" ? payload.ts : Date.now();
+    const mergeTs = monoTs;
+    const line = JSON.stringify({
+      ...payload,
+      sessionId: this.sessionId,
+      targetId: this.targetId,
+      seq: this.eventSeq,
+      monoTs,
+      mergeTs,
+    });
+    this.pushUiMarkerLine(line);
   }
 
   /** 由 Core 侧 UI binding 调用，向 SSE 推送 assertion_checkpoint 行 */
@@ -153,7 +177,7 @@ class ActiveRecording implements RecordingHandle {
     if (!env) return;
     const throttled = throttlePointerMove(env, this.pointerState, POINTER_MOVE_MIN_INTERVAL_MS);
     if (!throttled) return;
-    const line = JSON.stringify(throttled);
+    const line = this.enrichEnvelope(throttled);
     for (const fn of this.subscribers) {
       try {
         fn(line);
@@ -161,6 +185,22 @@ class ActiveRecording implements RecordingHandle {
         /* 订阅者异常不影响其他 */
       }
     }
+  }
+
+  /** 为 NDJSON 行附加 targetId / seq / monoTs / mergeTs，满足多 target 合并序规范。 */
+  private enrichEnvelope(env: ReplayEnvelope): string {
+    this.eventSeq += 1;
+    const monoTs = env.ts;
+    const mergeTs = monoTs;
+    const payload: Record<string, unknown> = {
+      ...(env as unknown as Record<string, unknown>),
+      sessionId: this.sessionId,
+      targetId: this.targetId,
+      seq: this.eventSeq,
+      monoTs,
+      mergeTs,
+    };
+    return JSON.stringify(payload);
   }
 
   subscribe(fn: Subscriber): () => void {
@@ -231,8 +271,31 @@ class ActiveRecording implements RecordingHandle {
 
 const recordings = new Map<string, RecordingHandle>();
 
+/** 同一会话下允许同时活跃的 page 矢量录制 target 数上限（多 BrowserWindow / 多 target 并行）。 */
+export const MAX_PARALLEL_PAGE_RECORDINGS_PER_SESSION = 8;
+
 export function recordingMapKey(sessionId: string, targetId: string): string {
   return `${sessionId}::${targetId}`;
+}
+
+/** 当前 session 已占用的 page 录制槽位数（每个 `targetId` 最多一条）。 */
+export function countActivePageRecordingsForSession(sessionId: string): number {
+  const prefix = `${sessionId}::`;
+  let n = 0;
+  for (const k of recordings.keys()) {
+    if (k.startsWith(prefix)) n += 1;
+  }
+  return n;
+}
+
+/**
+ * 若再为新 `targetId` 启动录制是否会超出并行上限（已存在同 key 则 false）。
+ * @internal 供单测与路由层说明
+ */
+export function wouldExceedParallelRecordingLimit(sessionId: string, targetId: string): boolean {
+  const key = recordingMapKey(sessionId, targetId);
+  if (recordings.has(key)) return false;
+  return countActivePageRecordingsForSession(sessionId) >= MAX_PARALLEL_PAGE_RECORDINGS_PER_SESSION;
 }
 
 /**
@@ -308,6 +371,12 @@ export async function startPageRecording(
 
   const key = recordingMapKey(sessionId, targetId);
   if (recordings.has(key)) return { ok: true };
+  if (wouldExceedParallelRecordingLimit(sessionId, targetId)) {
+    return {
+      error: "Parallel page recording limit reached for this session",
+      code: "PARALLEL_LIMIT_EXCEEDED",
+    };
+  }
 
   const wsUrl = await getBrowserWsUrl(ctx.cdpPort);
   if (!wsUrl) return { error: "Cannot resolve browser WebSocket URL", code: "CDP_NOT_READY" };
@@ -338,7 +407,7 @@ export async function startPageRecording(
       await cdp.send("Runtime.addBinding", { name: REPLAY_UI_BINDING_NAME }, flatSessionId);
     }
 
-    const rec = new ActiveRecording(cdp, flatSessionId, injectControls);
+    const rec = new ActiveRecording(cdp, flatSessionId, injectControls, sessionId, targetId);
 
     cdp.onProtocolEvent = (method, params, eventSessionId) => {
       if (method !== "Runtime.bindingCalled") return;

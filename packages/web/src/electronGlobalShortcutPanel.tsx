@@ -159,8 +159,13 @@ export function ElectronGlobalShortcutPanel() {
         <a href="https://www.electronjs.org/docs/latest/api/accelerator" target="_blank" rel="noreferrer">
           Electron Accelerator
         </a>
-        。主进程仍会规范化并注册。若与系统快捷键冲突会注册失败。macOS 非 QWERTY 布局下 Electron 全局快捷键存在已知限制。矢量录制相关动作对
-        <strong>当前观测标签</strong>生效。
+        。主进程仍会规范化并注册。若与系统快捷键冲突会注册失败。macOS 非 QWERTY 布局下 Electron 全局快捷键存在已知限制。
+        <strong>业务路径</strong>：主进程直连 Core <code>control/global-shortcut</code>。未在 Studio 固定会话时，主进程会从 Core 拉取 <strong>running</strong> 会话并依次调用；<strong>矢量开/关</strong>由 Core 按各会话 CDP 页 target 处理。可选打开会话详情 / 矢量 Tab 以收窄作用域或指定打点 target。
+      </p>
+      <p style={{ margin: "0 0 8px", fontSize: 11, color: "#64748b", lineHeight: 1.45 }}>
+        <strong>多路矢量录制并行时（同一会话多个 target）：</strong>
+        打入点 / 出点 / 检查点类快捷键仅对<strong>当前选中的观测标签</strong>所绑定的 <code>targetId</code> 生效（与对应按钮一致）；合并时间线上的顺序由 Core 下发的{" "}
+        <code>mergeTs</code>、<code>targetId</code>、<code>seq</code> 决定。
       </p>
       {recordingId ? (
         <p style={{ margin: "0 0 8px", padding: "6px 8px", borderRadius: 6, background: "#fef3c7", color: "#92400e", fontSize: 11 }}>

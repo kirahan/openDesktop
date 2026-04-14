@@ -18,6 +18,7 @@ import {
   resetRrwebSseCountForTest,
   tryAcquireRrwebSseStream,
 } from "../session-replay/rrwebSseLimiter.js";
+import { resetReplayMarkersForTest } from "../session-replay/replayMarkers.js";
 import * as recordingService from "../session-replay/recordingService.js";
 import { loadConfig } from "../config.js";
 import { createApp } from "./createApp.js";
@@ -387,6 +388,107 @@ describe("createApp HTTP", () => {
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe("VALIDATION_ERROR");
     spy.mockRestore();
+  });
+
+  it("POST /v1/sessions/:id/control/global-shortcut returns 401 without Bearer", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const res = await request(app)
+      .post("/v1/sessions/sid/control/global-shortcut")
+      .send({ actionId: "vector-record-toggle" });
+    expect(res.status).toBe(401);
+  });
+
+  it("POST /v1/sessions/:id/control/global-shortcut returns 400 for unknown actionId", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const res = await request(app)
+      .post("/v1/sessions/sid/control/global-shortcut")
+      .set("Authorization", "Bearer t")
+      .send({ actionId: "not-a-real-action" });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("POST /v1/sessions/:id/replay/recording/start maps PARALLEL_LIMIT_EXCEEDED to 409", async () => {
+    recordingService.resetRecordingRegistryForTest();
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const spyRec = vi.spyOn(recordingService, "startPageRecording").mockResolvedValue({
+      error: "Parallel page recording limit reached for this session",
+      code: "PARALLEL_LIMIT_EXCEEDED",
+    });
+    const res = await request(app)
+      .post("/v1/sessions/sid/replay/recording/start")
+      .set("Authorization", "Bearer t")
+      .send({ targetId: "T9" });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("PARALLEL_LIMIT_EXCEEDED");
+    spyRec.mockRestore();
+    recordingService.resetRecordingRegistryForTest();
+  });
+
+  it("POST /v1/sessions/:id/replay/markers returns 400 when scope=target without targetId", async () => {
+    resetReplayMarkersForTest();
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const spy = vi.spyOn(manager, "getOpsContext");
+    spy.mockReturnValue({
+      state: "running",
+      cdpPort: 9222,
+      pid: 1,
+      allowScriptExecution: true,
+    });
+    const res = await request(app)
+      .post("/v1/sessions/sid/replay/markers")
+      .set("Authorization", "Bearer t")
+      .send({ mergedTs: 100, scope: "target" });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    spy.mockRestore();
+    resetReplayMarkersForTest();
+  });
+
+  it("POST /v1/sessions/:id/replay/markers 201 and GET returns markers", async () => {
+    resetReplayMarkersForTest();
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const spy = vi.spyOn(manager, "getOpsContext");
+    spy.mockReturnValue({
+      state: "running",
+      cdpPort: 9222,
+      pid: 1,
+      allowScriptExecution: true,
+    });
+    const post = await request(app)
+      .post("/v1/sessions/sx/replay/markers")
+      .set("Authorization", "Bearer t")
+      .send({ mergedTs: 42, scope: "session", kind: "checkpoint" });
+    expect(post.status).toBe(201);
+    expect(post.body.marker.scope).toBe("session");
+    const get = await request(app)
+      .get("/v1/sessions/sx/replay/markers")
+      .set("Authorization", "Bearer t");
+    expect(get.status).toBe(200);
+    expect(get.body.markers).toHaveLength(1);
+    expect(get.body.markers[0].mergedTs).toBe(42);
+    spy.mockRestore();
+    resetReplayMarkersForTest();
   });
 
   it("GET /v1/sessions/:id/replay/stream returns 401 without Bearer", async () => {

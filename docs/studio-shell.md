@@ -71,14 +71,16 @@ Electron **preload** 可选暴露：
 
 ### 全局快捷键（矢量录制 / 打点，仅 Electron）
 
-**Node 基座 + 外置浏览器无此能力**（不展示配置 UI）。Electron 主进程使用 `globalShortcut` 注册**系统级**快捷键，通过 IPC **`od:global-shortcut`** 向 Studio 投递闭集 **`actionId`**，由 Web 调用与观测抽屉内按钮等价的逻辑（当前标签须为「矢量录制」流时，`vector-record-toggle` 才切换开/关；打点需录制已「开始」）。
+**Node 基座 + 外置浏览器无此能力**（不展示配置 UI）。Electron 主进程使用 `globalShortcut` 注册**系统级**快捷键；按下后由**主进程**使用与 Core 一致的 **Bearer**（`token.txt`）直接请求 **`POST /v1/sessions/:sessionId/control/global-shortcut`**，**业务在 Core 内执行**，不依赖 Studio Web 是否已打开。**会话作用域**：若 Web 未通过 **`setStudioSessionContext`** 固定会话，主进程会 **`GET /v1/sessions`**，对全部 **`state === running`** 的会话依次调用控制面（`vector-record-toggle` 对每个 running 会话各执行一次；多会话时 **segment/checkpoint** 仅作用于列表中的**第一个** running 会话，避免歧义）。可选：在 Studio 打开会话详情 / 矢量 Tab 时同步 `sessionId`、`targetId` 以收窄作用域或指定打点 target。
 
 | 能力 | preload / IPC |
 |------|----------------|
 | 应用绑定 | `setGlobalShortcutBindings(bindings)` → `invoke("od:set-global-shortcuts", bindings)`；`bindings` 为 `{ [actionId: string]: accelerator }`，空字符串表示不绑定。 |
-| 订阅按键 | `onGlobalShortcutAction(cb)` → 监听 `od:global-shortcut`，载荷 `{ actionId }`。 |
+| 快捷键上下文 | `setStudioSessionContext({ sessionId, targetId? })` → `invoke("od:set-studio-session-context")`；矢量 Tab 选中时带 `targetId`，供 segment/checkpoint；仅会话详情时可为 `targetId: null`。 |
 
 动作 ID：`vector-record-toggle`、`segment-start`、`segment-end`、`checkpoint`。配置持久化在浏览器 **`localStorage`**（`od_global_shortcut_bindings_v1`），启动时自动同步主进程。
+
+**控制面 API（第三方客户端可同样调用）**：`POST /v1/sessions/:sessionId/control/global-shortcut`，`Authorization: Bearer`，JSON body `{ "actionId": "<闭集>" }`；可选 `targetIds`（矢量批量）、`targetId`（打点单 target）。`vector-record-toggle` 在未传 `targetIds` 时由 Core 拉取 CDP 拓扑中 **`type === "page"`** 的全部 target 并批量 start/stop。
 
 **排障（组合键「保存并注册」失败或不触发）：**
 
@@ -89,6 +91,14 @@ Electron **preload** 可选暴露：
 - **macOS 键盘布局**：Electron 对非 QWERTY 布局的全局快捷键存在长期限制（上游 issue），若异常可尝试 QWERTY 或换用其他组合键。
 
 打点时 Web 请求 Core：**`POST /v1/sessions/:sessionId/replay/recording/ui-marker`**，body `{ targetId, cmd: "segment_start" | "segment_end" | "checkpoint" }`（须已有活跃矢量录制）。
+
+### 多 target 并行录制与合并时间线（session-replay-multi-target）
+
+- **同一会话**下可对**多个 `targetId`** 同时开启矢量录制（有并发上限；第二个 target 启动失败时返回 **409** `PARALLEL_LIMIT_EXCEEDED`）。
+- 矢量 NDJSON 行会携带 **`targetId`、`seq`、`monoTs`、`mergeTs`**（及 `sessionId`），用于多轨合并排序；**不要**仅靠窗口焦点推断归属。
+- **合并序**：按 `(mergeTs, targetId, seq)` 全序（详见 Core `replayTimelineMerge`）。
+- **会话标记（入点/出点/检查点，MVP）**：`POST /v1/sessions/:sessionId/replay/markers`，body 含 `mergedTs`、`scope`（`session` | `target`）；`scope=target` 时 **必须**带 `targetId`。`GET` 同路径返回当前进程内已排队列。
+- **全局快捷键矢量开/关**：由 Core 对会话内 **CDP page 型 target**（或请求体显式 `targetIds`）批量 start/stop；**打点**使用 Web 同步到主进程的 `targetId`（矢量 Tab 选中时），多 page 且无 `targetId` 时 Core 返回可机读错误。
 
 ## 3. 生产打包（占位）
 

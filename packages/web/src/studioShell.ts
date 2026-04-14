@@ -25,8 +25,14 @@ export type OdShellElectron = {
   setGlobalShortcutBindings?: (
     bindings: Record<string, string>,
   ) => Promise<{ ok?: boolean; errors?: Array<{ actionId: string; accelerator: string; code: string }> }>;
-  /** 订阅主进程转发的全局快捷键动作（闭集 actionId） */
-  onGlobalShortcutAction?: (cb: (payload: { actionId: string }) => void) => () => void;
+  /**
+   * 将当前选中的会话 ID 同步到主进程，供全局快捷键直连 Core `control/global-shortcut` 使用。
+   */
+  setStudioSessionContext?: (payload: {
+    sessionId: string | null;
+    /** 矢量观测当前 Tab 的 target，供 segment/checkpoint 使用 */
+    targetId?: string | null;
+  }) => Promise<{ ok?: boolean }>;
 };
 
 declare global {

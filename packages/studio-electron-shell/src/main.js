@@ -81,6 +81,12 @@ let qtAxLastHitFrameGlobal = null;
 let globalShortcutBindingsSnapshot = {};
 
 /**
+ * 由 Studio Web `setStudioSessionContext` IPC 同步。
+ * `sessionId`：当前会话；`targetId` 可选，矢量观测 Tab 选中时用于 segment/checkpoint 单 target。
+ */
+let studioShortcutContext = { sessionId: null, targetId: null };
+
+/**
  * 将用户输入整理为 Electron 可解析的 accelerator（全角符号、修饰键别名、多余空格等）。
  * @param {string} raw
  * @returns {string} 规范化后的字符串；无法解析时返回 ""
@@ -131,6 +137,135 @@ function normalizeAcceleratorKeyToken(seg) {
   return seg.normalize("NFKC").trim();
 }
 
+function readCoreBearerTokenSync() {
+  const p = resolveCoreTokenFilePath();
+  try {
+    if (!existsSync(p)) return "";
+    return readFileSync(p, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 从 Core 拉取 `state === running` 的会话 ID（不依赖 Web 打开会话详情）。
+ * @param {string} token
+ * @returns {Promise<string[]>}
+ */
+async function fetchRunningSessionIdsFromCore(token) {
+  const base = `http://127.0.0.1:${corePort}`;
+  try {
+    const res = await fetch(`${base}/v1/sessions`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      console.warn("[studio-electron-shell][globalShortcut] GET /v1/sessions 失败", { status: res.status });
+      return [];
+    }
+    const data = await res.json();
+    const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    return sessions
+      .filter((s) => s && String(s.state ?? "").toLowerCase() === "running")
+      .map((s) => s.id)
+      .filter((id) => typeof id === "string" && id.length > 0);
+  } catch (e) {
+    console.warn("[studio-electron-shell][globalShortcut] GET /v1/sessions 异常", {
+      message: e instanceof Error ? e.message : String(e),
+    });
+    return [];
+  }
+}
+
+/**
+ * 解析要调用的会话列表：优先 Web 同步的 `studioShortcutContext.sessionId`；否则用 Core `GET /v1/sessions` 的 running 列表。
+ * `vector-record-toggle` 对多个 running 会话各调一次；segment/checkpoint 多会话时仅第一个（避免歧义）。
+ * @param {string} actionId
+ * @param {string} token
+ * @returns {Promise<string[]>}
+ */
+async function resolveSessionIdsForShortcut(actionId, token) {
+  const pinned = typeof studioShortcutContext.sessionId === "string" ? studioShortcutContext.sessionId.trim() : "";
+  if (pinned) {
+    return [pinned];
+  }
+  const ids = await fetchRunningSessionIdsFromCore(token);
+  if (ids.length === 0) {
+    return [];
+  }
+  const isSeg =
+    actionId === "segment-start" || actionId === "segment-end" || actionId === "checkpoint";
+  if (isSeg && ids.length > 1) {
+    console.info("[studio-electron-shell][globalShortcut] 多 running 会话，打点仅使用第一个", {
+      used: ids[0],
+      all: ids,
+    });
+    return [ids[0]];
+  }
+  return ids;
+}
+
+/**
+ * 主进程直连 Core `POST /v1/sessions/:sessionId/control/global-shortcut`（不经过 Web）。
+ * @param {string} actionId
+ */
+async function invokeGlobalShortcutControlFromMain(actionId) {
+  if (typeof actionId !== "string" || !actionId.trim()) return;
+  const token = readCoreBearerTokenSync();
+  if (!token) {
+    console.warn("[studio-electron-shell][globalShortcut] token.txt 为空，跳过 Core 控制面调用");
+    return;
+  }
+  const sessionIds = await resolveSessionIdsForShortcut(actionId, token);
+  if (sessionIds.length === 0) {
+    console.warn(
+      "[studio-electron-shell][globalShortcut] 无可用会话：请确认 Core 已启动且存在 state=running 的会话（或于 Studio 同步会话以固定作用域）",
+    );
+    return;
+  }
+  const base = `http://127.0.0.1:${corePort}`;
+  for (const sessionId of sessionIds) {
+    const url = `${base}/v1/sessions/${encodeURIComponent(sessionId)}/control/global-shortcut`;
+    const body = { actionId };
+    if (
+      (actionId === "segment-start" || actionId === "segment-end" || actionId === "checkpoint") &&
+      typeof studioShortcutContext.targetId === "string" &&
+      studioShortcutContext.targetId.trim()
+    ) {
+      body.targetId = studioShortcutContext.targetId.trim();
+    }
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      const tx = await res.text();
+      let preview = tx.slice(0, 600);
+      try {
+        const j = JSON.parse(tx);
+        preview = JSON.stringify(j).slice(0, 600);
+      } catch {
+        /* raw */
+      }
+      console.info("[studio-electron-shell][globalShortcut] Core 控制面响应", {
+        actionId,
+        sessionId,
+        httpStatus: res.status,
+        bodyPreview: preview,
+      });
+    } catch (e) {
+      console.warn("[studio-electron-shell][globalShortcut] Core 请求失败", {
+        actionId,
+        sessionId,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+}
+
 function unregisterAllGlobalShortcuts() {
   try {
     globalShortcut.unregisterAll();
@@ -178,11 +313,7 @@ function applyGlobalShortcutBindings(bindings) {
           actionId,
           accelerator,
         });
-        if (studioShellMainWindow && !studioShellMainWindow.isDestroyed()) {
-          studioShellMainWindow.webContents.send("od:global-shortcut", { actionId });
-        } else {
-          console.warn("[studio-electron-shell][globalShortcut] 主窗口不可用，未向渲染进程发送", { actionId });
-        }
+        void invokeGlobalShortcutControlFromMain(actionId);
       });
     } catch {
       registered = false;
@@ -482,6 +613,17 @@ function logStartupDiagnostics() {
 }
 
 function registerIpc() {
+  ipcMain.handle("od:set-studio-session-context", async (_event, payload) => {
+    const p = payload && typeof payload === "object" ? payload : {};
+    const sid =
+      typeof p.sessionId === "string" && p.sessionId.trim() ? p.sessionId.trim() : null;
+    const tid =
+      typeof p.targetId === "string" && p.targetId.trim() ? p.targetId.trim() : null;
+    studioShortcutContext = { sessionId: sid, targetId: tid };
+    console.info("[studio-electron-shell][session-context] 快捷键上下文", studioShortcutContext);
+    return { ok: true };
+  });
+
   ipcMain.handle("od:set-global-shortcuts", async (_event, bindings) => {
     const b = bindings && typeof bindings === "object" ? bindings : {};
     console.info("[studio-electron-shell][globalShortcut] IPC od:set-global-shortcuts 收到", {
