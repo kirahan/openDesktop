@@ -343,6 +343,52 @@ describe("createApp HTTP", () => {
     recordingService.resetRecordingRegistryForTest();
   });
 
+  it("POST /v1/sessions/:id/replay/recording/ui-marker returns 409 when no active recording", async () => {
+    recordingService.resetRecordingRegistryForTest();
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const spy = vi.spyOn(manager, "getOpsContext");
+    spy.mockReturnValue({
+      state: "running",
+      cdpPort: 9222,
+      pid: 1,
+      allowScriptExecution: true,
+    });
+    const res = await request(app)
+      .post("/v1/sessions/sid/replay/recording/ui-marker")
+      .set("Authorization", "Bearer t")
+      .send({ targetId: "T1", cmd: "segment_start" });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("RECORDER_NOT_ACTIVE");
+    spy.mockRestore();
+    recordingService.resetRecordingRegistryForTest();
+  });
+
+  it("POST /v1/sessions/:id/replay/recording/ui-marker returns 400 for invalid cmd", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    const spy = vi.spyOn(manager, "getOpsContext");
+    spy.mockReturnValue({
+      state: "running",
+      cdpPort: 9222,
+      pid: 1,
+      allowScriptExecution: true,
+    });
+    const res = await request(app)
+      .post("/v1/sessions/sid/replay/recording/ui-marker")
+      .set("Authorization", "Bearer t")
+      .send({ targetId: "T1", cmd: "nope" });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    spy.mockRestore();
+  });
+
   it("GET /v1/sessions/:id/replay/stream returns 401 without Bearer", async () => {
     dir = await mkdtemp(path.join(tmpdir(), "od-http-"));
     const store = new JsonFileStore(dir);

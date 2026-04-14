@@ -18,6 +18,15 @@ export type OdShellElectron = {
   setQtAxHitHighlight?: (
     rect: null | { x: number; y: number; width: number; height: number },
   ) => Promise<{ ok?: boolean; error?: string } | void>;
+  /**
+   * 注册全局快捷键（主进程 `globalShortcut`）。`bindings` 的 key 为动作 ID，value 为 Electron accelerator 字符串。
+   * @see packages/web/src/studioGlobalShortcuts.ts
+   */
+  setGlobalShortcutBindings?: (
+    bindings: Record<string, string>,
+  ) => Promise<{ ok?: boolean; errors?: Array<{ actionId: string; accelerator: string; code: string }> }>;
+  /** 订阅主进程转发的全局快捷键动作（闭集 actionId） */
+  onGlobalShortcutAction?: (cb: (payload: { actionId: string }) => void) => () => void;
 };
 
 declare global {

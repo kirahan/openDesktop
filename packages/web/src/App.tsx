@@ -30,6 +30,7 @@ import {
   buildNativeAccessibilityAtPointPath,
   QT_AX_SHELL_CURSOR_POLL_MS,
 } from "./nativeA11yAtPointUrl.js";
+import { ElectronGlobalShortcutPanel } from "./electronGlobalShortcutPanel.js";
 import { applyElectronShellBearerTokenPrefillIfEmpty, getElectronShell } from "./studioShell.js";
 
 type DetailKind = "list-window" | "metrics" | "snapshot" | "native-a11y" | "native-a11y-point";
@@ -1683,6 +1684,70 @@ function LiveConsoleDockLayout({
 
   const active = tabs.find((t) => t.id === activeId) ?? null;
   const tokenOk = token.trim().length > 0;
+
+  const handleGlobalShortcutAction = useCallback(
+    (actionId: string) => {
+      const log = (msg: string, extra?: Record<string, unknown>) => {
+        console.info("[openDesktop][global-shortcut][handler]", msg, { actionId, ...extra });
+      };
+      const tok = token.trim();
+      if (!tok) {
+        log("忽略：未填写 Bearer（实时观测抽屉内 token 为空）");
+        return;
+      }
+      const cur = tabsRef.current.find((t) => t.id === activeId) ?? null;
+      if (actionId === "vector-record-toggle") {
+        if (!cur || cur.streamKind !== "replay") {
+          log("忽略：当前观测标签不是「矢量录制」", { activeId, streamKind: cur?.streamKind });
+          return;
+        }
+        if (cur.running) {
+          log("执行：停止矢量录制流", { tabId: cur.id });
+          void stopStream(cur.id);
+        } else {
+          log("执行：启动矢量录制流", { tabId: cur.id, sessionId: cur.sessionId });
+          void startStream(cur.id, cur.sessionId, cur.targetId, "replay");
+        }
+        return;
+      }
+      if (actionId === "segment-start" || actionId === "segment-end" || actionId === "checkpoint") {
+        if (!cur || cur.streamKind !== "replay" || !cur.running) {
+          log("忽略：需要当前标签为矢量录制且录制进行中", {
+            activeId,
+            streamKind: cur?.streamKind,
+            running: cur?.running,
+          });
+          return;
+        }
+        const cmd =
+          actionId === "segment-start"
+            ? "segment_start"
+            : actionId === "segment-end"
+              ? "segment_end"
+              : "checkpoint";
+        const base = apiRoot.replace(/\/$/, "");
+        const url = `${base}/v1/sessions/${encodeURIComponent(cur.sessionId)}/replay/recording/ui-marker`;
+        log("执行：POST ui-marker", { cmd, sessionId: cur.sessionId, targetId: cur.targetId });
+        void fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tok}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ targetId: cur.targetId, cmd }),
+        }).catch(() => undefined);
+        return;
+      }
+      console.info("[openDesktop][global-shortcut][handler] 忽略：未知 actionId", { actionId });
+    },
+    [activeId, apiRoot, token, startStream, stopStream],
+  );
+
+  useEffect(() => {
+    const sh = getElectronShell();
+    if (!sh?.onGlobalShortcutAction) return;
+    return sh.onGlobalShortcutAction((p) => handleGlobalShortcutAction(p.actionId));
+  }, [handleGlobalShortcutAction]);
   const drawerWide =
     active?.streamKind === "network" ||
     active?.streamKind === "proxy" ||
@@ -1791,11 +1856,18 @@ function LiveConsoleDockLayout({
         </div>
           {!tokenOk ? (
             <div style={{ padding: 12, fontSize: 12, color: OBS_PALETTE.textMuted }}>填写 Bearer 后可用</div>
-          ) : tabs.length === 0 ? (
+          ) : (
+            <>
+              {getElectronShell()?.setGlobalShortcutBindings ? (
+                <div style={{ padding: "8px 12px 0", flexShrink: 0 }}>
+                  <ElectronGlobalShortcutPanel />
+                </div>
+              ) : null}
+              {tabs.length === 0 ? (
             <div style={{ padding: 12, fontSize: 12, color: OBS_PALETTE.textMuted, lineHeight: 1.5 }}>
               在「窗口 / 调试目标」卡片中打开「页面控制台 / 主进程日志 / HTTPS / 异常栈 / 矢量录制 / rrweb」，或点右下角「实时观测」，可新开标签；同一窗口可开多种流（多 tab）。
             </div>
-          ) : (
+              ) : (
             <div
               style={{
                 flex: 1,
@@ -2061,6 +2133,8 @@ function LiveConsoleDockLayout({
                 </div>
               )}
             </div>
+              )}
+            </>
           )}
         </aside>
     </LiveConsoleDockContext.Provider>

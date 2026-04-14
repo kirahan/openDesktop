@@ -48,4 +48,28 @@ contextBridge.exposeInMainWorld("__OD_SHELL__", {
     });
   },
   pickExecutableFile: () => ipcRenderer.invoke("od:pick-executable-file"),
+  /**
+   * 应用全局快捷键绑定（actionId → Electron accelerator 字符串，空字符串表示不绑定）。
+   * @returns {Promise<{ ok: boolean; errors?: Array<{ actionId: string; accelerator: string; code: string }> }>}
+   */
+  setGlobalShortcutBindings: (bindings) => {
+    console.info("[studio-electron-shell][preload][globalShortcut] invoke od:set-global-shortcuts", bindings);
+    return ipcRenderer.invoke("od:set-global-shortcuts", bindings).then((r) => {
+      console.info("[studio-electron-shell][preload][globalShortcut] od:set-global-shortcuts 返回", r);
+      return r;
+    });
+  },
+  /**
+   * @param {(payload: { actionId: string }) => void} cb
+   * @returns {() => void} 取消订阅
+   */
+  onGlobalShortcutAction: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    const handler = (_event, payload) => {
+      console.info("[studio-electron-shell][preload][globalShortcut] 收到 od:global-shortcut", payload);
+      if (payload && typeof payload.actionId === "string") cb({ actionId: payload.actionId });
+    };
+    ipcRenderer.on("od:global-shortcut", handler);
+    return () => ipcRenderer.removeListener("od:global-shortcut", handler);
+  },
 });

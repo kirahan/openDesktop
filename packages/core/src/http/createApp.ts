@@ -25,12 +25,14 @@ import {
   tryAcquireReplaySseStream,
 } from "../session-replay/replaySseLimiter.js";
 import {
+  emitPageRecordingStudioUiMarker,
   isPageRecordingActive,
   POINTER_MOVE_MIN_INTERVAL_MS,
   startPageRecording,
   stopPageRecording,
   subscribePageRecording,
   sweepStalePageRecordings,
+  type ReplayUiCommand,
 } from "../session-replay/recordingService.js";
 import {
   releaseRrwebSseStream,
@@ -1092,6 +1094,45 @@ export function createApp(deps: AppDeps): CreateAppResult {
       return jsonError(res, status, code, result.error);
     }
     res.json({ ok: true, sessionId, targetId });
+  });
+
+  /** Studio / Electron 全局快捷键：向活跃矢量录制注入段标记或检查点（不经页面 binding） */
+  v1.post("/sessions/:sessionId/replay/recording/ui-marker", async (req, res) => {
+    const sessionId = req.params.sessionId;
+    const body = req.body as { targetId?: string; cmd?: string };
+    const targetId = typeof body?.targetId === "string" ? body.targetId.trim() : "";
+    const cmdRaw = typeof body?.cmd === "string" ? body.cmd.trim() : "";
+    if (!targetId) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "targetId required");
+    }
+    const ctx = manager.getOpsContext(sessionId);
+    if (!ctx) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (ctx.state !== "running") {
+      return jsonError(res, 503, "SESSION_NOT_ACTIVE", "Session is not running");
+    }
+    if (!ctx.allowScriptExecution) {
+      return jsonError(
+        res,
+        403,
+        "SCRIPT_NOT_ALLOWED",
+        "allowScriptExecution is false for this session",
+      );
+    }
+    let ui: ReplayUiCommand | null = null;
+    if (cmdRaw === "segment_start") ui = { kind: "segment_start" };
+    else if (cmdRaw === "segment_end") ui = { kind: "segment_end" };
+    else if (cmdRaw === "checkpoint") ui = { kind: "checkpoint" };
+    if (!ui) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "cmd must be segment_start | segment_end | checkpoint");
+    }
+    sweepStalePageRecordings(manager);
+    const result = emitPageRecordingStudioUiMarker(sessionId, targetId, ui);
+    if ("error" in result) {
+      const code = result.code;
+      const status = code === "RECORDER_NOT_ACTIVE" ? 409 : code === "RECORDER_NO_UI" ? 503 : 500;
+      return jsonError(res, status, code, result.error);
+    }
+    res.json({ ok: true, sessionId, targetId, cmd: cmdRaw });
   });
 
   v1.post("/sessions/:sessionId/test-recording-artifacts", async (req, res) => {

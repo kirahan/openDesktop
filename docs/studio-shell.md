@@ -69,6 +69,27 @@ Electron **preload** 可选暴露：
 
 覆盖层页面仅绘制**十字线 + 圆点**，**不**绘制控件矩形（与 OpenSpec `studio-qt-ax-cursor-overlay` 一致）。外置浏览器无此 API，Studio 仍走 nut-js 轮询路径。
 
+### 全局快捷键（矢量录制 / 打点，仅 Electron）
+
+**Node 基座 + 外置浏览器无此能力**（不展示配置 UI）。Electron 主进程使用 `globalShortcut` 注册**系统级**快捷键，通过 IPC **`od:global-shortcut`** 向 Studio 投递闭集 **`actionId`**，由 Web 调用与观测抽屉内按钮等价的逻辑（当前标签须为「矢量录制」流时，`vector-record-toggle` 才切换开/关；打点需录制已「开始」）。
+
+| 能力 | preload / IPC |
+|------|----------------|
+| 应用绑定 | `setGlobalShortcutBindings(bindings)` → `invoke("od:set-global-shortcuts", bindings)`；`bindings` 为 `{ [actionId: string]: accelerator }`，空字符串表示不绑定。 |
+| 订阅按键 | `onGlobalShortcutAction(cb)` → 监听 `od:global-shortcut`，载荷 `{ actionId }`。 |
+
+动作 ID：`vector-record-toggle`、`segment-start`、`segment-end`、`checkpoint`。配置持久化在浏览器 **`localStorage`**（`od_global_shortcut_bindings_v1`），启动时自动同步主进程。
+
+**排障（组合键「保存并注册」失败或不触发）：**
+
+- **Accelerator 格式**：须为 Electron 可解析字符串，用**半角** `+` 连接修饰键与主键，避免多空格或全角 `＋`（主进程会做 NFKC/别名规范化，但无法修复所有输入错误）。
+- **已被占用**：若组合键已被系统或其他应用占用，`globalShortcut.register` 会失败且无系统提示；请更换组合键。
+- **重复绑定**：同一组合键不可绑定两个动作；界面会提示 `DUPLICATE_ACCELERATOR`。
+- **Linux Wayland**：壳在检测到 `XDG_SESSION_TYPE=wayland` 时会追加 `enable-features=GlobalShortcutsPortal`（与 Electron 文档一致）。
+- **macOS 键盘布局**：Electron 对非 QWERTY 布局的全局快捷键存在长期限制（上游 issue），若异常可尝试 QWERTY 或换用其他组合键。
+
+打点时 Web 请求 Core：**`POST /v1/sessions/:sessionId/replay/recording/ui-marker`**，body `{ targetId, cmd: "segment_start" | "segment_end" | "checkpoint" }`（须已有活跃矢量录制）。
+
 ## 3. 生产打包（占位）
 
 使用 `electron-builder` 将 Core **`dist`**、Web **`dist`** 与壳一并打包、签名等，可在后续变更中补充。打包后 **`app.isPackaged === true`**：Electron 加载 **Core 提供的 HTTP 根路径**上的静态 Web，**不再**内嵌 Vite 开发服（见上文「开发 vs 生产」表）。

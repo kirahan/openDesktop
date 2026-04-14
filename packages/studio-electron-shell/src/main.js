@@ -19,7 +19,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, screen } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, screen } from "electron";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** `packages/studio-electron-shell` 根目录 */
@@ -76,6 +76,134 @@ let qtAxCursorInterval = null;
 /** Core `hitFrame`（Electron 全局坐标），由渲染进程在 at-point 轮询成功后回传 */
 /** @type {{ x: number; y: number; width: number; height: number } | null} */
 let qtAxLastHitFrameGlobal = null;
+
+/** @type {Record<string, string>} actionId → accelerator（空字符串表示未绑定） */
+let globalShortcutBindingsSnapshot = {};
+
+/**
+ * 将用户输入整理为 Electron 可解析的 accelerator（全角符号、修饰键别名、多余空格等）。
+ * @param {string} raw
+ * @returns {string} 规范化后的字符串；无法解析时返回 ""
+ * @see https://www.electronjs.org/docs/latest/api/accelerator
+ */
+function normalizeElectronAccelerator(raw) {
+  if (typeof raw !== "string") return "";
+  let s = raw.trim();
+  if (!s) return "";
+  s = s.replace(/\uFF0B/g, "+").replace(/\uFE62/g, "+");
+  const segments = s
+    .split("+")
+    .map((p) => p.normalize("NFKC").trim())
+    .filter(Boolean);
+  if (segments.length === 0) return "";
+  if (segments.length === 1) {
+    return normalizeAcceleratorKeyToken(segments[0]);
+  }
+  const keyPart = segments[segments.length - 1];
+  const modParts = segments.slice(0, -1).map(normalizeAcceleratorModifierToken);
+  return [...modParts, normalizeAcceleratorKeyToken(keyPart)].join("+");
+}
+
+/** @param {string} seg */
+function normalizeAcceleratorModifierToken(seg) {
+  const t = seg.normalize("NFKC").trim();
+  const compact = t.toLowerCase().replace(/\s+/g, "");
+  const aliases = {
+    command: "Command",
+    cmd: "Command",
+    control: "Control",
+    ctrl: "Control",
+    commandorcontrol: "CommandOrControl",
+    cmdorctrl: "CommandOrControl",
+    option: "Option",
+    opt: "Option",
+    alt: "Alt",
+    shift: "Shift",
+    super: "Super",
+    meta: "Super",
+  };
+  if (aliases[compact]) return aliases[compact];
+  return t;
+}
+
+/** @param {string} seg */
+function normalizeAcceleratorKeyToken(seg) {
+  return seg.normalize("NFKC").trim();
+}
+
+function unregisterAllGlobalShortcuts() {
+  try {
+    globalShortcut.unregisterAll();
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * @param {Record<string, string>} bindings actionId → Electron accelerator 字符串
+ * @returns {{ ok: boolean; errors: Array<{ actionId: string; accelerator: string; code: string }> }}
+ */
+function applyGlobalShortcutBindings(bindings) {
+  unregisterAllGlobalShortcuts();
+  const errors = [];
+  if (!bindings || typeof bindings !== "object") {
+    return { ok: true, errors: [] };
+  }
+  /** @type {Map<string, string>} normalized accelerator → 先占用的 actionId */
+  const seenAccel = new Map();
+  for (const [actionId, acc] of Object.entries(bindings)) {
+    if (typeof acc !== "string" || !acc.trim()) continue;
+    const accelerator = normalizeElectronAccelerator(acc);
+    if (!accelerator) {
+      console.info("[studio-electron-shell][globalShortcut] 跳过（规范化后为空）", { actionId, raw: acc });
+      continue;
+    }
+    if (acc.trim() !== accelerator) {
+      console.info("[studio-electron-shell][globalShortcut] 规范化", { actionId, raw: acc.trim(), normalized: accelerator });
+    }
+    const dup = seenAccel.get(accelerator);
+    if (dup) {
+      errors.push({
+        actionId,
+        accelerator,
+        code: "DUPLICATE_ACCELERATOR",
+        otherActionId: dup,
+      });
+      continue;
+    }
+    let registered = false;
+    try {
+      registered = globalShortcut.register(accelerator, () => {
+        console.info("[studio-electron-shell][globalShortcut] 用户按下已注册快捷键", {
+          actionId,
+          accelerator,
+        });
+        if (studioShellMainWindow && !studioShellMainWindow.isDestroyed()) {
+          studioShellMainWindow.webContents.send("od:global-shortcut", { actionId });
+        } else {
+          console.warn("[studio-electron-shell][globalShortcut] 主窗口不可用，未向渲染进程发送", { actionId });
+        }
+      });
+    } catch {
+      registered = false;
+    }
+    if (!registered) {
+      console.warn(
+        "[studio-electron-shell][globalShortcut] register 失败（格式无效、已被系统/其他应用占用，或当前环境限制）：",
+        actionId,
+        accelerator,
+      );
+      errors.push({ actionId, accelerator, code: "REGISTER_FAILED" });
+    } else {
+      console.info("[studio-electron-shell][globalShortcut] 注册成功", { actionId, accelerator });
+      seenAccel.set(accelerator, actionId);
+    }
+  }
+  globalShortcutBindingsSnapshot = { ...bindings };
+  const summary = { ok: errors.length === 0, errorCount: errors.length, registered: [...seenAccel.keys()] };
+  console.info("[studio-electron-shell][globalShortcut] applyGlobalShortcutBindings 结束", summary);
+  return { ok: errors.length === 0, errors };
+}
 
 function stopQtAxOverlayInternal() {
   if (qtAxCursorInterval) {
@@ -354,6 +482,17 @@ function logStartupDiagnostics() {
 }
 
 function registerIpc() {
+  ipcMain.handle("od:set-global-shortcuts", async (_event, bindings) => {
+    const b = bindings && typeof bindings === "object" ? bindings : {};
+    console.info("[studio-electron-shell][globalShortcut] IPC od:set-global-shortcuts 收到", {
+      actionIds: Object.keys(b),
+      bindings: b,
+    });
+    const result = applyGlobalShortcutBindings(b);
+    console.info("[studio-electron-shell][globalShortcut] IPC od:set-global-shortcuts 返回", result);
+    return result;
+  });
+
   ipcMain.handle("od:read-core-bearer-token", async () => {
     const p = resolveCoreTokenFilePath();
     const exists = existsSync(p);
@@ -577,6 +716,7 @@ async function createWindow() {
   });
   studioShellMainWindow = win;
   win.on("closed", () => {
+    unregisterAllGlobalShortcuts();
     stopQtAxOverlayInternal();
     studioShellMainWindow = null;
   });
@@ -599,6 +739,15 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  // Wayland：全局快捷键需 Chromium GlobalShortcutsPortal（Electron 文档）。
+  if (process.platform === "linux" && process.env.XDG_SESSION_TYPE === "wayland") {
+    try {
+      app.commandLine.appendSwitch("enable-features", "GlobalShortcutsPortal");
+    } catch {
+      /* ignore */
+    }
+  }
+
   app.on("second-instance", () => {
     const w = BrowserWindow.getAllWindows()[0];
     if (w) {
@@ -621,12 +770,14 @@ if (!gotLock) {
   });
 
   app.on("before-quit", (e) => {
+    unregisterAllGlobalShortcuts();
     if (quitAfterCleanup) return;
     const hasCore = !!coreChild?.pid;
     const hasVite = !!viteDevChild?.pid;
     if (!hasCore && !hasVite) return;
     e.preventDefault();
     quitAfterCleanup = true;
+    unregisterAllGlobalShortcuts();
     stopQtAxOverlayInternal();
     void Promise.all([killCoreChild(), killViteDevChild()]).finally(() => {
       app.quit();

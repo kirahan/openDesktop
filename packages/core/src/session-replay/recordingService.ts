@@ -177,6 +177,21 @@ class ActiveRecording implements RecordingHandle {
     };
   }
 
+  /** Studio / HTTP 投递的 UI 标记（与页面内 `REPLAY_UI_BINDING_NAME` 等价） */
+  applyStudioUiCommand(ui: ReplayUiCommand): void {
+    if (ui.kind === "segment_start") {
+      this.emitSegmentStart(ui.note);
+      return;
+    }
+    if (ui.kind === "segment_end") {
+      this.emitSegmentEnd(ui.note);
+      return;
+    }
+    if (ui.kind === "checkpoint") {
+      this.emitAssertionCheckpoint(ui.note);
+    }
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -405,6 +420,26 @@ export function subscribePageRecording(
   const rec = recordings.get(recordingMapKey(sessionId, targetId));
   if (!rec) return undefined;
   return rec.subscribe(fn);
+}
+
+/**
+ * 由 Studio（HTTP）投递 UI 标记，无需经页面 binding。
+ */
+export function emitPageRecordingStudioUiMarker(
+  sessionId: string,
+  targetId: string,
+  ui: ReplayUiCommand,
+): { ok: true } | { error: string; code: string } {
+  const handle = recordings.get(recordingMapKey(sessionId, targetId));
+  if (!handle) {
+    return { error: "Recording is not active for this target", code: "RECORDER_NOT_ACTIVE" };
+  }
+  const applier = (handle as { applyStudioUiCommand?: (u: ReplayUiCommand) => void }).applyStudioUiCommand;
+  if (typeof applier !== "function") {
+    return { error: "Recorder does not support UI markers", code: "RECORDER_NO_UI" };
+  }
+  applier.call(handle, ui);
+  return { ok: true };
 }
 
 /** 测试用：清空注册表并关闭连接 */
