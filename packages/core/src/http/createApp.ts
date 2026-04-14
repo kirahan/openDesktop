@@ -75,6 +75,7 @@ import { pickWindowsExecutablePath } from "../dialog/pickWindowsExecutablePath.j
 import { resolveWindowsShortcutFromPath } from "../shortcut/resolveWindowsShortcut.js";
 import { dumpMacAccessibilityTree } from "../nativeAccessibility/macAxTree.js";
 import { dumpMacAccessibilityAtPoint } from "../nativeAccessibility/macAxTreeAtPoint.js";
+import { dumpWinAccessibilityAtPoint, dumpWinAccessibilityTree } from "../nativeAccessibility/winUiaTreeAtPoint.js";
 import { getGlobalMousePosition } from "../nativeAccessibility/getGlobalMousePosition.js";
 import {
   parseTestRecordingArtifact,
@@ -185,6 +186,9 @@ export function createApp(deps: AppDeps): CreateAppResult {
       "page_session_replay",
       "session_replay_rrweb",
       ...(process.platform === "darwin"
+        ? (["native_accessibility_tree", "native_accessibility_at_point"] as const)
+        : []),
+      ...(process.platform === "win32"
         ? (["native_accessibility_tree", "native_accessibility_at_point"] as const)
         : []),
       ...(config.enableAgentApi ? (["agent", "snapshot"] as const) : []),
@@ -530,10 +534,15 @@ export function createApp(deps: AppDeps): CreateAppResult {
     res.json({ session: enriched });
   });
 
-  /** macOS：按会话子进程 PID 采集系统 Accessibility（AX）UI 树（Qt 等无 CDP 页面）。 */
+  /** macOS AX / Windows UI Automation：按会话子进程 PID 采集整棵原生无障碍树（Qt 等无 CDP 页面）。 */
   v1.get("/sessions/:sessionId/native-accessibility-tree", async (req, res) => {
-    if (process.platform !== "darwin") {
-      return jsonError(res, 400, "PLATFORM_UNSUPPORTED", "native accessibility tree is only available on macOS");
+    if (process.platform !== "darwin" && process.platform !== "win32") {
+      return jsonError(
+        res,
+        400,
+        "PLATFORM_UNSUPPORTED",
+        "native accessibility tree is only available on macOS and Windows",
+      );
     }
     const sessionId = req.params.sessionId;
     const s = manager.get(sessionId);
@@ -554,7 +563,10 @@ export function createApp(deps: AppDeps): CreateAppResult {
       50_000,
       Math.max(1, typeof maxNodesRaw === "string" ? Number.parseInt(maxNodesRaw, 10) || 5000 : 5000),
     );
-    const result = await dumpMacAccessibilityTree(s.pid, { maxDepth, maxNodes });
+    const result =
+      process.platform === "darwin"
+        ? await dumpMacAccessibilityTree(s.pid, { maxDepth, maxNodes })
+        : await dumpWinAccessibilityTree(s.pid, { maxDepth, maxNodes });
     if (!result.ok) {
       if (result.code === "ACCESSIBILITY_DISABLED") {
         return jsonError(
@@ -562,7 +574,9 @@ export function createApp(deps: AppDeps): CreateAppResult {
           403,
           "ACCESSIBILITY_DISABLED",
           result.message ||
-            'Grant "Accessibility" to the terminal or opd binary in System Settings → Privacy & Security.',
+            (process.platform === "darwin"
+              ? 'Grant "Accessibility" to the terminal or opd binary in System Settings → Privacy & Security.'
+              : "无法加载 Windows UI Automation，或被策略禁用。"),
         );
       }
       const status = result.code === "PLATFORM_UNSUPPORTED" ? 400 : 422;
@@ -574,14 +588,14 @@ export function createApp(deps: AppDeps): CreateAppResult {
     });
   });
 
-  /** macOS：按屏幕坐标（或当前鼠标）在会话 PID 对应应用内命中 AX 元素并返回局部子树。 */
+  /** macOS AX / Windows UI Automation：按屏幕坐标（或当前鼠标）在会话 PID 内命中并无障碍局部子树。 */
   v1.get("/sessions/:sessionId/native-accessibility-at-point", async (req, res) => {
-    if (process.platform !== "darwin") {
+    if (process.platform !== "darwin" && process.platform !== "win32") {
       return jsonError(
         res,
         400,
         "PLATFORM_UNSUPPORTED",
-        "native accessibility at-point is only available on macOS",
+        "native accessibility at-point is only available on macOS and Windows",
       );
     }
     const sessionId = req.params.sessionId;
@@ -623,13 +637,22 @@ export function createApp(deps: AppDeps): CreateAppResult {
       50_000,
       Math.max(1, parsePositiveIntQuery(req.query.maxNodes, 5000)),
     );
-    const result = await dumpMacAccessibilityAtPoint(s.pid, {
-      screenX,
-      screenY,
-      maxAncestorDepth,
-      maxLocalDepth,
-      maxNodes,
-    });
+    const result =
+      process.platform === "darwin"
+        ? await dumpMacAccessibilityAtPoint(s.pid, {
+            screenX,
+            screenY,
+            maxAncestorDepth,
+            maxLocalDepth,
+            maxNodes,
+          })
+        : await dumpWinAccessibilityAtPoint(s.pid, {
+            screenX,
+            screenY,
+            maxAncestorDepth,
+            maxLocalDepth,
+            maxNodes,
+          });
     if (!result.ok) {
       if (result.code === "ACCESSIBILITY_DISABLED") {
         return jsonError(
@@ -637,8 +660,13 @@ export function createApp(deps: AppDeps): CreateAppResult {
           403,
           "ACCESSIBILITY_DISABLED",
           result.message ||
-            'Grant "Accessibility" to the terminal or opd binary in System Settings → Privacy & Security.',
+            (process.platform === "darwin"
+              ? 'Grant "Accessibility" to the terminal or opd binary in System Settings → Privacy & Security.'
+              : "UI Automation access failed"),
         );
+      }
+      if (result.code === "HIT_OUTSIDE_SESSION") {
+        return jsonError(res, 400, result.code, result.message);
       }
       const status = result.code === "PLATFORM_UNSUPPORTED" ? 400 : 422;
       return jsonError(res, status, result.code, result.message);

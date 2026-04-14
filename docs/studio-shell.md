@@ -60,7 +60,13 @@ yarn electron:dev
 
 在 Electron 内，「选择可执行文件」**优先**使用 **Electron 原生** `dialog.showOpenDialog`（不经由 Core 的 pick-executable HTTP）；提交注册仍走 **`POST /v1/apps`**。
 
-### Qt 会话：屏幕十字线 + AX「指针附近」树（仅 macOS）
+### Qt 会话：屏幕十字线 +「指针附近」无障碍树
+
+**macOS**：使用系统 **Accessibility（AX）**；详见下节 Electron 十字线与 `native-accessibility-at-point` 坐标约定。
+
+**Windows**：Core 通过 **PowerShell 调用 .NET UI Automation**（`native-windows/uia-at-point.ps1`）在屏幕坐标处命中元素，并校验 **`ProcessId` 与会话 `pid` 一致**；若指针下为其它应用则返回 **`HIT_OUTSIDE_SESSION`**。坐标为 **屏幕像素**；多显示器与 DPI 下请与 Electron **`screen.getCursorScreenPoint`** 或显式 `x`/`y` 查询参数保持一致。**整树** `native-accessibility-tree` 在 Windows 上仍可能未实现，以 **`GET /v1/version` → `capabilities`** 为准。
+
+### Qt 会话：Electron 十字线与 AX 指针（macOS 细节）
 
 Electron **preload** 可选暴露：
 

@@ -31,7 +31,7 @@ export type MacAxAtPointResult = MacAxAtPointOk | MacAxAtPointErr;
 
 /** 解析 Swift `axTreeAtPoint` stdout */
 export function parseMacAxAtPointStdout(raw: string): MacAxAtPointResult {
-  const t = raw.trim();
+  const t = raw.replace(/^\uFEFF/, "").trim();
   if (!t.startsWith("{")) {
     return { ok: false, code: "PARSE_FAILED", message: t.slice(0, 200) || "empty stdout" };
   }

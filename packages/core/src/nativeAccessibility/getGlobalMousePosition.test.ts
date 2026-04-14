@@ -45,7 +45,7 @@ describe("getGlobalMousePosition", () => {
     if (!r.ok) expect(r.code).toBe("MOUSE_POSITION_UNAVAILABLE");
   });
 
-  it("returns unavailable when not darwin", async () => {
+  it("returns unavailable on linux", async () => {
     setPlatform("linux");
     vi.resetModules();
     const { getGlobalMousePosition } = await import("./getGlobalMousePosition.js");

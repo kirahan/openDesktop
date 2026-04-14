@@ -864,8 +864,11 @@ function registerIpc() {
    * @see docs/studio-shell.md
    */
   ipcMain.handle("od:qt-ax-overlay-start", async () => {
-    if (process.platform !== "darwin") {
-      return { ok: false, error: "Qt AX overlay is only supported on macOS" };
+    if (process.platform !== "darwin" && process.platform !== "win32") {
+      return {
+        ok: false,
+        error: "Qt AX overlay is only supported on macOS and Windows",
+      };
     }
     if (qtAxOverlayWindow && !qtAxOverlayWindow.isDestroyed()) {
       return { ok: true };

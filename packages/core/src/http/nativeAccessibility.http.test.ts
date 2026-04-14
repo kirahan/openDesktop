@@ -5,6 +5,7 @@ import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../config.js";
 import { dumpMacAccessibilityTree } from "../nativeAccessibility/macAxTree.js";
+import { dumpWinAccessibilityTree } from "../nativeAccessibility/winUiaTreeAtPoint.js";
 import { createApp } from "./createApp.js";
 import { SessionManager } from "../session/manager.js";
 import { JsonFileStore } from "../store/jsonStore.js";
@@ -13,7 +14,13 @@ vi.mock("../nativeAccessibility/macAxTree.js", () => ({
   dumpMacAccessibilityTree: vi.fn(),
 }));
 
+vi.mock("../nativeAccessibility/winUiaTreeAtPoint.js", () => ({
+  dumpWinAccessibilityAtPoint: vi.fn(),
+  dumpWinAccessibilityTree: vi.fn(),
+}));
+
 const dumpMock = dumpMacAccessibilityTree as ReturnType<typeof vi.fn>;
+const dumpWinTreeMock = dumpWinAccessibilityTree as ReturnType<typeof vi.fn>;
 
 describe("GET /v1/sessions/:sessionId/native-accessibility-tree", () => {
   let dir: string;
@@ -22,6 +29,7 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-tree", () => {
   beforeEach(() => {
     platformBackup = Object.getOwnPropertyDescriptor(process, "platform");
     dumpMock.mockReset();
+    dumpWinTreeMock.mockReset();
   });
 
   afterEach(async () => {
@@ -34,7 +42,7 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-tree", () => {
     Object.defineProperty(process, "platform", { value: p, configurable: true });
   }
 
-  it("returns 400 PLATFORM_UNSUPPORTED when not on darwin", async () => {
+  it("returns 400 PLATFORM_UNSUPPORTED when not on darwin or win32", async () => {
     setPlatform("linux");
     dir = await mkdtemp(path.join(tmpdir(), "od-ax-http-"));
     const store = new JsonFileStore(dir);
@@ -47,6 +55,7 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-tree", () => {
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe("PLATFORM_UNSUPPORTED");
     expect(dumpMock).not.toHaveBeenCalled();
+    expect(dumpWinTreeMock).not.toHaveBeenCalled();
   });
 
   it("returns 404 when session missing (darwin)", async () => {
@@ -62,6 +71,7 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-tree", () => {
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe("SESSION_NOT_FOUND");
     expect(dumpMock).not.toHaveBeenCalled();
+    expect(dumpWinTreeMock).not.toHaveBeenCalled();
   });
 
   it("returns 400 SESSION_NOT_READY when session not running", async () => {
@@ -84,6 +94,7 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-tree", () => {
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe("SESSION_NOT_READY");
     expect(dumpMock).not.toHaveBeenCalled();
+    expect(dumpWinTreeMock).not.toHaveBeenCalled();
     spy.mockRestore();
   });
 
@@ -106,6 +117,7 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-tree", () => {
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe("PID_UNAVAILABLE");
     expect(dumpMock).not.toHaveBeenCalled();
+    expect(dumpWinTreeMock).not.toHaveBeenCalled();
     spy.mockRestore();
   });
 
@@ -135,6 +147,36 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-tree", () => {
     expect(res.body.truncated).toBe(false);
     expect(res.body.root).toEqual({ role: "AXApplication", title: "App" });
     expect(dumpMock).toHaveBeenCalledWith(4242, { maxDepth: 12, maxNodes: 5000 });
+    expect(dumpWinTreeMock).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("returns 200 on win32 when dumpWinAccessibilityTree succeeds", async () => {
+    setPlatform("win32");
+    dir = await mkdtemp(path.join(tmpdir(), "od-ax-http-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    dumpWinTreeMock.mockResolvedValue({
+      ok: true,
+      truncated: false,
+      root: { role: "Application", title: "PID 99", children: [] },
+    });
+    const spy = vi.spyOn(manager, "get").mockReturnValue({
+      id: "sid",
+      profileId: "p",
+      state: "running",
+      createdAt: new Date().toISOString(),
+      pid: 99,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/native-accessibility-tree")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(200);
+    expect(res.body.root).toEqual({ role: "Application", title: "PID 99", children: [] });
+    expect(dumpWinTreeMock).toHaveBeenCalledWith(99, { maxDepth: 12, maxNodes: 5000 });
+    expect(dumpMock).not.toHaveBeenCalled();
     spy.mockRestore();
   });
 
@@ -162,6 +204,7 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-tree", () => {
       .set("Authorization", "Bearer t");
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe("ACCESSIBILITY_DISABLED");
+    expect(dumpWinTreeMock).not.toHaveBeenCalled();
     spy.mockRestore();
   });
 });

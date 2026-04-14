@@ -5,6 +5,7 @@ import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../config.js";
 import { dumpMacAccessibilityAtPoint } from "../nativeAccessibility/macAxTreeAtPoint.js";
+import { dumpWinAccessibilityAtPoint } from "../nativeAccessibility/winUiaTreeAtPoint.js";
 import { getGlobalMousePosition } from "../nativeAccessibility/getGlobalMousePosition.js";
 import { createApp } from "./createApp.js";
 import { SessionManager } from "../session/manager.js";
@@ -14,11 +15,17 @@ vi.mock("../nativeAccessibility/macAxTreeAtPoint.js", () => ({
   dumpMacAccessibilityAtPoint: vi.fn(),
 }));
 
+vi.mock("../nativeAccessibility/winUiaTreeAtPoint.js", () => ({
+  dumpWinAccessibilityAtPoint: vi.fn(),
+  dumpWinAccessibilityTree: vi.fn(),
+}));
+
 vi.mock("../nativeAccessibility/getGlobalMousePosition.js", () => ({
   getGlobalMousePosition: vi.fn(),
 }));
 
 const dumpMock = dumpMacAccessibilityAtPoint as ReturnType<typeof vi.fn>;
+const dumpWinMock = dumpWinAccessibilityAtPoint as ReturnType<typeof vi.fn>;
 const mouseMock = getGlobalMousePosition as ReturnType<typeof vi.fn>;
 
 describe("GET /v1/sessions/:sessionId/native-accessibility-at-point", () => {
@@ -28,6 +35,7 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-at-point", () => {
   beforeEach(() => {
     platformBackup = Object.getOwnPropertyDescriptor(process, "platform");
     dumpMock.mockReset();
+    dumpWinMock.mockReset();
     mouseMock.mockReset();
   });
 
@@ -40,7 +48,7 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-at-point", () => {
     Object.defineProperty(process, "platform", { value: p, configurable: true });
   }
 
-  it("returns 400 PLATFORM_UNSUPPORTED when not darwin", async () => {
+  it("returns 400 PLATFORM_UNSUPPORTED when not darwin or win32", async () => {
     setPlatform("linux");
     dir = await mkdtemp(path.join(tmpdir(), "od-axpt-"));
     const store = new JsonFileStore(dir);
@@ -53,6 +61,45 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-at-point", () => {
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe("PLATFORM_UNSUPPORTED");
     expect(dumpMock).not.toHaveBeenCalled();
+    expect(dumpWinMock).not.toHaveBeenCalled();
+  });
+
+  it("on win32 uses dumpWinAccessibilityAtPoint with explicit x,y", async () => {
+    setPlatform("win32");
+    dir = await mkdtemp(path.join(tmpdir(), "od-axpt-win-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    dumpWinMock.mockResolvedValue({
+      ok: true,
+      truncated: false,
+      screenX: 10,
+      screenY: 20,
+      ancestors: [],
+      at: { role: "button", title: "OK" },
+    });
+    const spy = vi.spyOn(manager, "get").mockReturnValue({
+      id: "sid",
+      profileId: "p",
+      state: "running",
+      createdAt: new Date().toISOString(),
+      pid: 42,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/native-accessibility-at-point?x=10&y=20")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(200);
+    expect(res.body.at.role).toBe("button");
+    expect(dumpWinMock).toHaveBeenCalledWith(42, {
+      screenX: 10,
+      screenY: 20,
+      maxAncestorDepth: 8,
+      maxLocalDepth: 4,
+      maxNodes: 5000,
+    });
+    expect(dumpMock).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 
   it("returns 422 when no x,y and mouse fails", async () => {

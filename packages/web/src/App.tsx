@@ -59,6 +59,18 @@ function isLikelyDarwinPlatform(): boolean {
   return p.toLowerCase().includes("mac") || /Mac OS X|iPhone|iPad/i.test(ua);
 }
 
+function isLikelyWindowsPlatform(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const p = navigator.platform ?? "";
+  const ua = navigator.userAgent ?? "";
+  return p.toLowerCase().includes("win") || /Windows NT|Win64|WOW64/i.test(ua);
+}
+
+/** Electron 全屏十字线：主进程已在 darwin / win32 启用 */
+function isLikelyQtAxCrosshairShellPlatform(): boolean {
+  return isLikelyDarwinPlatform() || isLikelyWindowsPlatform();
+}
+
 type Session = {
   id: string;
   profileId: string;
@@ -4619,8 +4631,8 @@ export function App() {
       setErr("需要 Electron 壳且 preload 包含 startQtAxOverlay / subscribeQtAxCursor。");
       return;
     }
-    if (!isLikelyDarwinPlatform()) {
-      setErr("屏幕十字线覆盖层仅支持 macOS。");
+    if (!isLikelyQtAxCrosshairShellPlatform()) {
+      setErr("屏幕十字线覆盖层仅支持 macOS 或 Windows（Electron 壳）。");
       return;
     }
     setErr(null);
@@ -5886,11 +5898,11 @@ export function App() {
                                   }
                                   disabled={
                                     !getElectronShell()?.startQtAxOverlay ||
-                                    !isLikelyDarwinPlatform()
+                                    !isLikelyQtAxCrosshairShellPlatform()
                                   }
                                   title={
-                                    !isLikelyDarwinPlatform()
-                                      ? "仅 macOS"
+                                    !isLikelyQtAxCrosshairShellPlatform()
+                                      ? "仅 macOS 或 Windows"
                                       : !getElectronShell()?.startQtAxOverlay
                                         ? "需使用 Electron 壳"
                                         : qtAxShellCaptureOn
@@ -5904,7 +5916,8 @@ export function App() {
                                     border: `1px solid ${OBS_PALETTE.borderActive}`,
                                     background: qtAxShellCaptureOn ? "#e0f2fe" : "#fff",
                                     cursor:
-                                      !getElectronShell()?.startQtAxOverlay || !isLikelyDarwinPlatform()
+                                      !getElectronShell()?.startQtAxOverlay ||
+                                      !isLikelyQtAxCrosshairShellPlatform()
                                         ? "not-allowed"
                                         : "pointer",
                                   }}

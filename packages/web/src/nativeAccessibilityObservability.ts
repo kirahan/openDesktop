@@ -6,7 +6,7 @@ export function nativeAccessibilityTreeDisabledReason(
   session: { state: string; pid?: number },
 ): string | null {
   if (!capabilities.includes("native_accessibility_tree")) {
-    return "Core 未声明 native_accessibility_tree（常见于非 macOS 或未启用该能力）";
+    return "Core 未声明 native_accessibility_tree（常见于 Linux 或 Core 构建未包含该能力）";
   }
   if ((session.state || "").toLowerCase() !== "running") {
     return "会话未在运行中";
@@ -31,7 +31,7 @@ export function nativeAccessibilityAtPointDisabledReason(
   session: { state: string; pid?: number },
 ): string | null {
   if (!capabilities.includes("native_accessibility_at_point")) {
-    return "Core 未声明 native_accessibility_at_point（常见于非 macOS）";
+    return "Core 未声明 native_accessibility_at_point（常见于非 macOS 且非 Windows，或 Core 未包含该构建）";
   }
   if ((session.state || "").toLowerCase() !== "running") {
     return "会话未在运行中";

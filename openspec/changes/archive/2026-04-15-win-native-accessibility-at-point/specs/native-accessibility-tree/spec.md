@@ -1,10 +1,11 @@
-# native-accessibility-tree Specification
+# Delta: native-accessibility-tree
 
-## Purpose
+## RENAMED Requirements
 
-约定经 Bearer 访问的 **`GET /v1/sessions/:sessionId/native-accessibility-tree`**：在会话子进程 **PID** 维度枚举 **无障碍 UI 树** 只读快照——**macOS** 为 **Accessibility（AX）**；**Windows**（实现就绪时）为 **UI Automation（UIA）** 等与实现对齐的技术栈。与 **`GET /v1/version` → `capabilities` 中的 `native_accessibility_tree`** 及 Studio「原生无障碍树」入口一致。
+- **FROM:** `### Requirement: 会话绑定且仅 macOS 提供原生无障碍树 HTTP 接口`
+- **TO:** `### Requirement: 会话绑定且在支持平台上提供原生无障碍树 HTTP 接口`
 
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: 会话绑定且在支持平台上提供原生无障碍树 HTTP 接口
 
@@ -19,24 +20,6 @@
 
 - **WHEN** 会话未处于 `running` 或缺少 `pid`
 - **THEN** 请求 SHALL 失败并返回可机读错误码（如 **`SESSION_NOT_READY`** / **`PID_UNAVAILABLE`**），且 SHALL NOT 执行树采集
-
-### Requirement: 树 JSON 形态与规模上限
-
-成功响应 SHALL 为 **JSON**，包含 **根节点对象** 及元数据字段（至少包括 **`truncated`** 布尔值，表示是否因上限截断）。每个节点 SHALL 至少包含 **`role`**（字符串）；SHALL 在可用时包含 **`title`**、**`value`**；子节点 SHALL 置于 **`children`** 数组中。系统 SHALL 支持通过查询参数限制 **`maxDepth`** 与 **`maxNodes`**（具备合理默认值与上限封顶），并在超过 **`maxNodes`** 时停止向下枚举并将 **`truncated`** 置为 **true**。
-
-#### Scenario: 默认上限防止失控
-
-- **WHEN** 目标应用存在极深或极宽的无障碍子树
-- **THEN** 响应 SHALL 在达到节点或深度上限时停止扩展，且 **`truncated`** SHALL 为 **true**
-
-### Requirement: 辅助功能 / 自动化 API 失败可辨识
-
-当系统因 **权限或运行时环境** 无法调用底层无障碍 API（如 macOS 未授予 **Accessibility**、Windows 无法加载 **UI Automation** 等）时，响应 SHALL 为 **403**（或项目约定的权限类 4xx），且正文 SHALL 包含可机读错误码（如 **`ACCESSIBILITY_DISABLED`**）及面向用户的简短说明（各平台授权或排障路径以实现为准）。系统 SHALL NOT 将此情况与「空树 / 应用未暴露控件」无差别地返回 **200**。
-
-#### Scenario: 未授权与空树区分
-
-- **WHEN** 底层 API 返回权限或环境相关错误
-- **THEN** 响应 SHALL 为权限或失败语义（非 200），且 SHALL 与「200 + 空或极浅树」可区分
 
 ### Requirement: 能力探测
 

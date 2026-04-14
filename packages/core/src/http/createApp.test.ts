@@ -53,6 +53,9 @@ describe("createApp HTTP", () => {
     if (process.platform === "darwin") {
       expect(v.body.capabilities).toContain("native_accessibility_tree");
       expect(v.body.capabilities).toContain("native_accessibility_at_point");
+    } else if (process.platform === "win32") {
+      expect(v.body.capabilities).toContain("native_accessibility_tree");
+      expect(v.body.capabilities).toContain("native_accessibility_at_point");
     } else {
       expect(v.body.capabilities).not.toContain("native_accessibility_tree");
       expect(v.body.capabilities).not.toContain("native_accessibility_at_point");
