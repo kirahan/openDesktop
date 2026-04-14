@@ -1,7 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { killExistingProcessesForExecutable, launchDebuggedApp } from "../process/launcher.js";
 import type { JsonFileStore } from "../store/jsonStore.js";
-import type { AppDefinition } from "../store/types.js";
+import { normalizeUiRuntime, type AppDefinition } from "../store/types.js";
 import { appendAudit } from "../audit.js";
 import { pickFreePort } from "../net/pickPort.js";
 import { assertTransition, canTransition } from "./fsm.js";
@@ -195,28 +195,33 @@ export class SessionManager {
       }
     });
 
-    try {
-      await waitForCdpReady(cdpPort, 20000);
-    } catch (e) {
-      assertTransition(s.state, "failed");
-      s.state = "failed";
-      s.error = e instanceof Error ? e.message : String(e);
+    // CDP 仅 Chromium/Electron 在注入 `--remote-debugging-port` 后可用。Qt 即使误带该参数也不会提供 /json/version。
+    const expectCdp =
+      app.injectElectronDebugPort && normalizeUiRuntime(app.uiRuntime) !== "qt";
+    if (expectCdp) {
       try {
-        child.kill("SIGTERM");
-      } catch {
-        /* ignore */
-      }
-      if (localProxyClose) {
+        await waitForCdpReady(cdpPort, 20000);
+      } catch (e) {
+        assertTransition(s.state, "failed");
+        s.state = "failed";
+        s.error = e instanceof Error ? e.message : String(e);
         try {
-          await localProxyClose();
+          child.kill("SIGTERM");
         } catch {
-          /* noop */
+          /* ignore */
         }
+        if (localProxyClose) {
+          try {
+            await localProxyClose();
+          } catch {
+            /* noop */
+          }
+        }
+        s.localProxyPort = undefined;
+        s.proxySubscribers = undefined;
+        s.localProxyClose = undefined;
+        return;
       }
-      s.localProxyPort = undefined;
-      s.proxySubscribers = undefined;
-      s.localProxyClose = undefined;
-      return;
     }
 
     assertTransition(s.state, "running");

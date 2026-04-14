@@ -1,16 +1,16 @@
 /**
- * Studio Electron 壳 — 开发 vs 生产（与下方 `shouldUseCoreDist` / `resolveStudioLoadUrl` 一致）
+ * Studio Electron shell — dev vs production (see `shouldUseCoreDist` / `resolveStudioLoadUrl` below).
  *
- * **开发（未打包，`app.isPackaged === false`）**
- * 1. **Core**：默认用 **源码** — `node --import tsx packages/core/src/cli.ts core start …`，**不是** `packages/core/dist/cli.js`。
- *    - 例外：`OPENDESKTOP_ELECTRON_USE_CORE_DIST=1` 时改为 dist/cli.js（对齐 CI / 强制构建验证）。
- * 2. **Electron 窗口中的 Web**：默认 **Vite 开发服** `http://127.0.0.1:5173/`（自动 `yarn dev:web` 或复用已启动），**不是** `packages/web/dist` 的构建产物。
- *    - 例外：`OPENDESKTOP_STUDIO_USE_CORE_UI=1` 时改为加载 Core 端口上的静态页（需已 `web build` 且 Core 带 `--web-dist`）。
- * 3. **说明**：若本机已有 `packages/web/dist/index.html`，`buildCoreStartArgs()` 仍可能给 Core 加上 `--web-dist`，便于**外置浏览器**直接打开 `http://127.0.0.1:8787/`；这与 **Electron 窗口默认走 Vite** 并行不冲突。
+ * **Development (`app.isPackaged === false`)**
+ * 1. **Core**: default **from source** — `node --import tsx packages/core/src/cli.ts core start …`, not `packages/core/dist/cli.js`.
+ *    - Exception: `OPENDESKTOP_ELECTRON_USE_CORE_DIST=1` uses dist/cli.js (CI / built verification).
+ * 2. **Web in the Electron window**: default **Vite dev server** `http://127.0.0.1:5173/` (auto `yarn dev:web` or reuse), not `packages/web/dist`.
+ *    - Exception: `OPENDESKTOP_STUDIO_USE_CORE_UI=1` loads static UI from Core (needs `web build` and Core `--web-dist`).
+ * 3. **Note**: if `packages/web/dist/index.html` exists, `buildCoreStartArgs()` may still pass `--web-dist` for opening `http://127.0.0.1:8787/` in an external browser; this does not conflict with the window defaulting to Vite.
  *
- * **生产（已打包，`app.isPackaged === true`）**
- * - **Core**：使用 **`dist/cli.js`**（及后续包内资源布局）。
- * - **窗口**：加载 **`http://127.0.0.1:<Core 端口>/`**，由 **已打包的 Core 托管静态 Web**（`web/dist` 随产品分发），不再启动 Vite。
+ * **Production (`app.isPackaged === true`)**
+ * - **Core**: `dist/cli.js` (packaged layout).
+ * - **Window**: `http://127.0.0.1:<core-port>/` served by packaged Core; no Vite.
  *
  * @see docs/studio-shell.md
  */
@@ -19,77 +19,94 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, screen } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  globalShortcut,
+  ipcMain,
+  screen,
+} from "electron";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-/** `packages/studio-electron-shell` 根目录 */
+/** `packages/studio-electron-shell` package root */
 const shellRoot = path.resolve(__dirname, "..");
 /** monorepo `packages/` */
 const packagesDir = path.resolve(shellRoot, "..");
-/** 仓库根（`yarn dev:web` 需在根目录执行 workspace 脚本） */
+/** Repo root (`yarn dev:web` runs workspace scripts from here) */
 const repoRoot = path.resolve(packagesDir, "..");
 const coreCliJs = path.join(packagesDir, "core", "dist", "cli.js");
-/** 开发态可直接 spawn，无需先 build Core（与 `packages/core` 的 `cli` 脚本一致思路） */
+/** Dev: spawn Core from source without a prior build (same idea as `packages/core` cli script) */
 const coreCliTs = path.join(packagesDir, "core", "src", "cli.ts");
 const defaultWebDist = path.join(packagesDir, "web", "dist");
 
-/** 与 `packages/core/src/config.ts` 的默认数据目录一致，用于解析 token 文件路径 */
+/** Default data dir aligned with `packages/core/src/config.ts` (for token path resolution) */
 function defaultDataDir() {
   const base =
     process.platform === "darwin"
       ? path.join(homedir(), "Library", "Application Support", "OpenDesktop")
       : process.platform === "win32"
-        ? path.join(process.env.APPDATA ?? path.join(homedir(), "AppData", "Roaming"), "OpenDesktop")
-        : path.join(process.env.XDG_DATA_HOME ?? path.join(homedir(), ".local", "share"), "opendesktop");
+        ? path.join(
+            process.env.APPDATA ?? path.join(homedir(), "AppData", "Roaming"),
+            "OpenDesktop",
+          )
+        : path.join(
+            process.env.XDG_DATA_HOME ??
+              path.join(homedir(), ".local", "share"),
+            "opendesktop",
+          );
   return base;
 }
 
-/** 与 Core `loadConfig().tokenFile` 对齐（含 OPENDESKTOP_DATA_DIR / OPENDESKTOP_TOKEN_FILE） */
+/** Align with Core `loadConfig().tokenFile` (OPENDESKTOP_DATA_DIR / OPENDESKTOP_TOKEN_FILE) */
 function resolveCoreTokenFilePath() {
   const dataDir = process.env.OPENDESKTOP_DATA_DIR?.trim() || defaultDataDir();
   const tokenFile = process.env.OPENDESKTOP_TOKEN_FILE?.trim();
   return path.resolve(tokenFile || path.join(dataDir, "token.txt"));
 }
 
-const DEFAULT_PORT = Number.parseInt(process.env.OPENDESKTOP_PORT ?? "8787", 10);
+const DEFAULT_PORT = Number.parseInt(
+  process.env.OPENDESKTOP_PORT ?? "8787",
+  10,
+);
 const READY_POLL_MS = 200;
 const READY_TIMEOUT_MS = 60_000;
-/** 开发态默认走 Vite（与 `yarn dev:web` / `vite --host 127.0.0.1` 一致，默认端口 5173） */
+/** Dev default: Vite (`yarn dev:web` / `vite --host 127.0.0.1`, port 5173) */
 const DEFAULT_STUDIO_DEV_UI = "http://127.0.0.1:5173/";
 
 /** @type {import('child_process').ChildProcess | null} */
 let coreChild = null;
-/** 由壳启动的 `yarn dev:web`（Vite）；若你本机已手动起 Vite 则不会 spawn，此项为 null */
+/** Child: `yarn dev:web` (Vite) started by shell; null if Vite was already running */
 let viteDevChild = null;
 /** @type {number} */
 let corePort = Number.isFinite(DEFAULT_PORT) ? DEFAULT_PORT : 8787;
 let quitAfterCleanup = false;
 
-/** Studio 主 BrowserWindow（用于向渲染进程转发屏幕指针坐标） */
+/** Main Studio BrowserWindow (for forwarding pointer coords to renderer) */
 /** @type {BrowserWindow | null} */
 let studioShellMainWindow = null;
-/** 全屏透明十字线覆盖层 */
+/** Full-screen transparent crosshair overlay */
 /** @type {BrowserWindow | null} */
 let qtAxOverlayWindow = null;
 /** @type {ReturnType<typeof setInterval> | null} */
 let qtAxCursorInterval = null;
-/** Core `hitFrame`（Electron 全局坐标），由渲染进程在 at-point 轮询成功后回传 */
+/** Core `hitFrame` in Electron global coords; set from renderer after at-point poll */
 /** @type {{ x: number; y: number; width: number; height: number } | null} */
 let qtAxLastHitFrameGlobal = null;
 
-/** @type {Record<string, string>} actionId → accelerator（空字符串表示未绑定） */
+/** @type {Record<string, string>} actionId → accelerator (empty = unbound) */
 let globalShortcutBindingsSnapshot = {};
 
 /**
- * 由 Studio Web `setStudioSessionContext` IPC 同步。
- * `sessionId`：当前会话；`targetId` 可选，矢量观测 Tab 选中时用于 segment/checkpoint 单 target。
+ * Synced from Studio Web via `setStudioSessionContext` IPC.
+ * `sessionId`: current session; optional `targetId` for vector tab segment/checkpoint scope.
  */
 let studioShortcutContext = { sessionId: null, targetId: null };
 
 /**
- * 将用户输入整理为 Electron 可解析的 accelerator（全角符号、修饰键别名、多余空格等）。
+ * Normalize user input to an Electron accelerator string (full-width symbols, modifier aliases, etc.).
  * @param {string} raw
- * @returns {string} 规范化后的字符串；无法解析时返回 ""
+ * @returns {string} normalized string, or "" if invalid
  * @see https://www.electronjs.org/docs/latest/api/accelerator
  */
 function normalizeElectronAccelerator(raw) {
@@ -148,7 +165,7 @@ function readCoreBearerTokenSync() {
 }
 
 /**
- * 从 Core 拉取 `state === running` 的会话 ID（不依赖 Web 打开会话详情）。
+ * Fetch session IDs with `state === running` from Core (no need to open session in Web).
  * @param {string} token
  * @returns {Promise<string[]>}
  */
@@ -159,7 +176,10 @@ async function fetchRunningSessionIdsFromCore(token) {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) {
-      console.warn("[studio-electron-shell][globalShortcut] GET /v1/sessions 失败", { status: res.status });
+      console.warn(
+        "[studio-electron-shell][globalShortcut] GET /v1/sessions non-OK",
+        { status: res.status },
+      );
       return [];
     }
     const data = await res.json();
@@ -169,22 +189,28 @@ async function fetchRunningSessionIdsFromCore(token) {
       .map((s) => s.id)
       .filter((id) => typeof id === "string" && id.length > 0);
   } catch (e) {
-    console.warn("[studio-electron-shell][globalShortcut] GET /v1/sessions 异常", {
-      message: e instanceof Error ? e.message : String(e),
-    });
+    console.warn(
+      "[studio-electron-shell][globalShortcut] GET /v1/sessions threw",
+      {
+        message: e instanceof Error ? e.message : String(e),
+      },
+    );
     return [];
   }
 }
 
 /**
- * 解析要调用的会话列表：优先 Web 同步的 `studioShortcutContext.sessionId`；否则用 Core `GET /v1/sessions` 的 running 列表。
- * `vector-record-toggle` 对多个 running 会话各调一次；segment/checkpoint 多会话时仅第一个（避免歧义）。
+ * Resolve session IDs for shortcuts: prefer Web-synced `studioShortcutContext.sessionId`, else Core running list.
+ * `vector-record-toggle` calls each running session; segment/checkpoint use first only when multiple.
  * @param {string} actionId
  * @param {string} token
  * @returns {Promise<string[]>}
  */
 async function resolveSessionIdsForShortcut(actionId, token) {
-  const pinned = typeof studioShortcutContext.sessionId === "string" ? studioShortcutContext.sessionId.trim() : "";
+  const pinned =
+    typeof studioShortcutContext.sessionId === "string"
+      ? studioShortcutContext.sessionId.trim()
+      : "";
   if (pinned) {
     return [pinned];
   }
@@ -193,32 +219,39 @@ async function resolveSessionIdsForShortcut(actionId, token) {
     return [];
   }
   const isSeg =
-    actionId === "segment-start" || actionId === "segment-end" || actionId === "checkpoint";
+    actionId === "segment-start" ||
+    actionId === "segment-end" ||
+    actionId === "checkpoint";
   if (isSeg && ids.length > 1) {
-    console.info("[studio-electron-shell][globalShortcut] 多 running 会话，打点仅使用第一个", {
-      used: ids[0],
-      all: ids,
-    });
+    console.info(
+      "[studio-electron-shell][globalShortcut] multiple running sessions; segment/checkpoint uses first only",
+      {
+        used: ids[0],
+        all: ids,
+      },
+    );
     return [ids[0]];
   }
   return ids;
 }
 
 /**
- * 主进程直连 Core `POST /v1/sessions/:sessionId/control/global-shortcut`（不经过 Web）。
+ * Main process calls Core `POST /v1/sessions/:sessionId/control/global-shortcut` (not via Web).
  * @param {string} actionId
  */
 async function invokeGlobalShortcutControlFromMain(actionId) {
   if (typeof actionId !== "string" || !actionId.trim()) return;
   const token = readCoreBearerTokenSync();
   if (!token) {
-    console.warn("[studio-electron-shell][globalShortcut] token.txt 为空，跳过 Core 控制面调用");
+    console.warn(
+      "[studio-electron-shell][globalShortcut] token.txt empty; skip Core control-plane call",
+    );
     return;
   }
   const sessionIds = await resolveSessionIdsForShortcut(actionId, token);
   if (sessionIds.length === 0) {
     console.warn(
-      "[studio-electron-shell][globalShortcut] 无可用会话：请确认 Core 已启动且存在 state=running 的会话（或于 Studio 同步会话以固定作用域）",
+      "[studio-electron-shell][globalShortcut] no session: ensure Core is up and a session is running (or sync session in Studio)",
     );
     return;
   }
@@ -227,7 +260,9 @@ async function invokeGlobalShortcutControlFromMain(actionId) {
     const url = `${base}/v1/sessions/${encodeURIComponent(sessionId)}/control/global-shortcut`;
     const body = { actionId };
     if (
-      (actionId === "segment-start" || actionId === "segment-end" || actionId === "checkpoint") &&
+      (actionId === "segment-start" ||
+        actionId === "segment-end" ||
+        actionId === "checkpoint") &&
       typeof studioShortcutContext.targetId === "string" &&
       studioShortcutContext.targetId.trim()
     ) {
@@ -250,18 +285,24 @@ async function invokeGlobalShortcutControlFromMain(actionId) {
       } catch {
         /* raw */
       }
-      console.info("[studio-electron-shell][globalShortcut] Core 控制面响应", {
-        actionId,
-        sessionId,
-        httpStatus: res.status,
-        bodyPreview: preview,
-      });
+      console.info(
+        "[studio-electron-shell][globalShortcut] Core control-plane response",
+        {
+          actionId,
+          sessionId,
+          httpStatus: res.status,
+          bodyPreview: preview,
+        },
+      );
     } catch (e) {
-      console.warn("[studio-electron-shell][globalShortcut] Core 请求失败", {
-        actionId,
-        sessionId,
-        message: e instanceof Error ? e.message : String(e),
-      });
+      console.warn(
+        "[studio-electron-shell][globalShortcut] Core request failed",
+        {
+          actionId,
+          sessionId,
+          message: e instanceof Error ? e.message : String(e),
+        },
+      );
     }
   }
 }
@@ -275,7 +316,7 @@ function unregisterAllGlobalShortcuts() {
 }
 
 /**
- * @param {Record<string, string>} bindings actionId → Electron accelerator 字符串
+ * @param {Record<string, string>} bindings actionId → Electron accelerator string
  * @returns {{ ok: boolean; errors: Array<{ actionId: string; accelerator: string; code: string }> }}
  */
 function applyGlobalShortcutBindings(bindings) {
@@ -284,17 +325,24 @@ function applyGlobalShortcutBindings(bindings) {
   if (!bindings || typeof bindings !== "object") {
     return { ok: true, errors: [] };
   }
-  /** @type {Map<string, string>} normalized accelerator → 先占用的 actionId */
+  /** @type {Map<string, string>} normalized accelerator → first actionId using it */
   const seenAccel = new Map();
   for (const [actionId, acc] of Object.entries(bindings)) {
     if (typeof acc !== "string" || !acc.trim()) continue;
     const accelerator = normalizeElectronAccelerator(acc);
     if (!accelerator) {
-      console.info("[studio-electron-shell][globalShortcut] 跳过（规范化后为空）", { actionId, raw: acc });
+      console.info(
+        "[studio-electron-shell][globalShortcut] skip (empty after normalize)",
+        { actionId, raw: acc },
+      );
       continue;
     }
     if (acc.trim() !== accelerator) {
-      console.info("[studio-electron-shell][globalShortcut] 规范化", { actionId, raw: acc.trim(), normalized: accelerator });
+      console.info("[studio-electron-shell][globalShortcut] normalized", {
+        actionId,
+        raw: acc.trim(),
+        normalized: accelerator,
+      });
     }
     const dup = seenAccel.get(accelerator);
     if (dup) {
@@ -309,10 +357,13 @@ function applyGlobalShortcutBindings(bindings) {
     let registered = false;
     try {
       registered = globalShortcut.register(accelerator, () => {
-        console.info("[studio-electron-shell][globalShortcut] 用户按下已注册快捷键", {
-          actionId,
-          accelerator,
-        });
+        console.info(
+          "[studio-electron-shell][globalShortcut] accelerator pressed",
+          {
+            actionId,
+            accelerator,
+          },
+        );
         void invokeGlobalShortcutControlFromMain(actionId);
       });
     } catch {
@@ -320,19 +371,29 @@ function applyGlobalShortcutBindings(bindings) {
     }
     if (!registered) {
       console.warn(
-        "[studio-electron-shell][globalShortcut] register 失败（格式无效、已被系统/其他应用占用，或当前环境限制）：",
+        "[studio-electron-shell][globalShortcut] register failed (invalid, taken by OS/app, or unsupported):",
         actionId,
         accelerator,
       );
       errors.push({ actionId, accelerator, code: "REGISTER_FAILED" });
     } else {
-      console.info("[studio-electron-shell][globalShortcut] 注册成功", { actionId, accelerator });
+      console.info("[studio-electron-shell][globalShortcut] registered", {
+        actionId,
+        accelerator,
+      });
       seenAccel.set(accelerator, actionId);
     }
   }
   globalShortcutBindingsSnapshot = { ...bindings };
-  const summary = { ok: errors.length === 0, errorCount: errors.length, registered: [...seenAccel.keys()] };
-  console.info("[studio-electron-shell][globalShortcut] applyGlobalShortcutBindings 结束", summary);
+  const summary = {
+    ok: errors.length === 0,
+    errorCount: errors.length,
+    registered: [...seenAccel.keys()],
+  };
+  console.info(
+    "[studio-electron-shell][globalShortcut] applyGlobalShortcutBindings done",
+    summary,
+  );
   return { ok: errors.length === 0, errors };
 }
 
@@ -352,18 +413,20 @@ function stopQtAxOverlayInternal() {
   qtAxOverlayWindow = null;
 }
 
-/** 供 Core `core start --web-dist` 使用；与 Electron 窗口在开发态默认加载 Vite 无关（见文件头说明）。 */
+/** For Core `core start --web-dist`; unrelated to dev Electron window loading Vite (see file header). */
 function resolveWebDist() {
   const fromEnv = process.env.OPENDESKTOP_WEB_DIST?.trim();
-  if (fromEnv && existsSync(path.join(fromEnv, "index.html"))) return path.resolve(fromEnv);
-  if (existsSync(path.join(defaultWebDist, "index.html"))) return defaultWebDist;
+  if (fromEnv && existsSync(path.join(fromEnv, "index.html")))
+    return path.resolve(fromEnv);
+  if (existsSync(path.join(defaultWebDist, "index.html")))
+    return defaultWebDist;
   return null;
 }
 
 /**
- * 未打包：默认用 `node --import tsx src/cli.ts`（免先 build Core）。
- * 设置 `OPENDESKTOP_ELECTRON_USE_CORE_DIST=1` 时强制 `dist/cli.js`（接近生产/已构建验证）。
- * 已打包（`app.isPackaged`）：仅使用 dist（由 electron-builder 等资源布局提供路径；当前仍以 monorepo 路径解析）。
+ * Unpacked: default `node --import tsx src/cli.ts` (no prior Core build).
+ * `OPENDESKTOP_ELECTRON_USE_CORE_DIST=1` forces `dist/cli.js` (production-like).
+ * Packaged (`app.isPackaged`): dist only (paths from packager; still resolved via monorepo layout).
  */
 function shouldUseCoreDist() {
   if (app.isPackaged) return true;
@@ -371,7 +434,14 @@ function shouldUseCoreDist() {
 }
 
 function buildCoreStartArgs() {
-  const args = ["core", "start", "--port", String(corePort), "--host", "127.0.0.1"];
+  const args = [
+    "core",
+    "start",
+    "--port",
+    String(corePort),
+    "--host",
+    "127.0.0.1",
+  ];
   const webDist = resolveWebDist();
   if (webDist) args.push("--web-dist", webDist);
   return args;
@@ -400,12 +470,14 @@ async function waitForCoreHttpReady() {
     }
     await new Promise((r) => setTimeout(r, READY_POLL_MS));
   }
-  throw new Error(`Core 未在 ${READY_TIMEOUT_MS}ms 内就绪: ${url} — ${lastErr}`);
+  throw new Error(
+    `Core did not become ready within ${READY_TIMEOUT_MS}ms: ${url} — ${lastErr}`,
+  );
 }
 
 /**
- * 是否由 Core 本机端口直接提供页面（与 `waitForCoreHttpReady` 覆盖的 API 同源入口）。
- * 非此情况（如 Vite）需额外等待前端开发服务器就绪。
+ * True when Studio UI is served from Core on localhost (same origin as `waitForCoreHttpReady`).
+ * Otherwise (e.g. Vite) wait for the dev server separately.
  */
 function isStudioUrlServedByCore(loadUrl) {
   try {
@@ -417,29 +489,41 @@ function isStudioUrlServedByCore(loadUrl) {
 }
 
 /**
- * 解析 Electron 窗口加载的 Studio 前端 URL。
- * - 未打包默认：**Vite 开发服**（`DEFAULT_STUDIO_DEV_UI`），`/v1` 由 Vite 代理到 Core。
- * - `OPENDESKTOP_STUDIO_USE_CORE_UI=1`：改为加载 Core 托管的静态页（需已 `web build` 且通常带 `--web-dist`）。
- * - `OPENDESKTOP_STUDIO_URL`：完整覆盖（用于自定义 Vite 端口等）。
+ * Resolve Studio UI URL for the Electron window.
+ * - Dev default: Vite (`DEFAULT_STUDIO_DEV_UI`); `/v1` proxied to Core.
+ * - `OPENDESKTOP_STUDIO_USE_CORE_UI=1`: static UI from Core (needs `web build`, usually `--web-dist`).
+ * - `OPENDESKTOP_STUDIO_URL`: full override (custom Vite port, etc.).
  */
 function resolveStudioLoadUrl() {
   const forced = process.env.OPENDESKTOP_STUDIO_URL?.trim();
   if (forced) {
     const u = forced.endsWith("/") ? forced : `${forced}/`;
-    console.info("[studio-electron-shell][diag] 使用 OPENDESKTOP_STUDIO_URL:", u);
+    console.info(
+      "[studio-electron-shell][diag] using OPENDESKTOP_STUDIO_URL:",
+      u,
+    );
     return u;
   }
   if (app.isPackaged) {
     const u = `http://127.0.0.1:${corePort}/`;
-    console.info("[studio-electron-shell][diag] 已打包，加载 Core 根路径:", u);
+    console.info(
+      "[studio-electron-shell][diag] packaged build; load Core root:",
+      u,
+    );
     return u;
   }
   if (process.env.OPENDESKTOP_STUDIO_USE_CORE_UI === "1") {
     const u = `http://127.0.0.1:${corePort}/`;
-    console.info("[studio-electron-shell][diag] OPENDESKTOP_STUDIO_USE_CORE_UI=1，加载 Core 托管 Web:", u);
+    console.info(
+      "[studio-electron-shell][diag] OPENDESKTOP_STUDIO_USE_CORE_UI=1; load Core-hosted web:",
+      u,
+    );
     return u;
   }
-  console.info("[studio-electron-shell][diag] 开发默认加载 Vite:", DEFAULT_STUDIO_DEV_UI);
+  console.info(
+    "[studio-electron-shell][diag] dev default: Vite:",
+    DEFAULT_STUDIO_DEV_UI,
+  );
   return DEFAULT_STUDIO_DEV_UI;
 }
 
@@ -453,8 +537,8 @@ async function isHttpOk(url) {
 }
 
 /**
- * 是否在默认开发流下由壳自动执行 `yarn dev:web`（未手动指定其它 Studio URL 等）。
- * `OPENDESKTOP_ELECTRON_SKIP_VITE_SPAWN=1`：不 spawn，仅轮询（需自行先起 Vite）。
+ * Whether the shell auto-runs `yarn dev:web` in default dev flow (no manual Studio URL override, etc.).
+ * `OPENDESKTOP_ELECTRON_SKIP_VITE_SPAWN=1`: do not spawn; poll only (start Vite yourself).
  */
 function shouldAutoSpawnViteDev(loadUrl) {
   if (app.isPackaged) return false;
@@ -465,29 +549,57 @@ function shouldAutoSpawnViteDev(loadUrl) {
   return true;
 }
 
-/** 若需要 Vite 且端口空闲，则在仓库根 spawn `yarn dev:web` */
+/**
+ * When `OPENDESKTOP_ELECTRON_VITE_FORWARD_LOG=1`, inherit yarn/vite stdio; plain ANSI to reduce garbling.
+ * Set `OPENDESKTOP_ELECTRON_VITE_FANCY_LOG=1` to skip plain-env tweaks (keep full color output).
+ */
+function envForAutoViteSpawn() {
+  const env = { ...process.env };
+  if (process.env.OPENDESKTOP_ELECTRON_VITE_FANCY_LOG === "1") return env;
+  if (env.NO_COLOR === undefined) env.NO_COLOR = "1";
+  if (env.FORCE_COLOR === undefined) env.FORCE_COLOR = "0";
+  if (env.CI === undefined) env.CI = "1";
+  return env;
+}
+
+/** If Studio needs Vite and nothing responds yet, spawn `yarn dev:web` from repo root */
 async function ensureViteDevServerRunning(loadUrl) {
   if (isStudioUrlServedByCore(loadUrl)) return;
   if (await isHttpOk(loadUrl)) {
-    console.info("[studio-electron-shell][vite] 开发服务器已在运行:", loadUrl);
+    console.info(
+      "[studio-electron-shell][vite] dev server already running:",
+      loadUrl,
+    );
     return;
   }
   if (!shouldAutoSpawnViteDev(loadUrl)) {
-    console.info("[studio-electron-shell][vite] 未自动启动（见 OPENDESKTOP_STUDIO_URL / SKIP 等），等待外部就绪…");
+    console.info(
+      "[studio-electron-shell][vite] auto-start skipped (see OPENDESKTOP_STUDIO_URL / SKIP_VITE); waiting for external server…",
+    );
     return;
   }
-  console.info("[studio-electron-shell][vite] 正在启动: yarn dev:web（cwd=%s）", repoRoot);
-  const yarnCmd = process.platform === "win32" ? "yarn.cmd" : "yarn";
-  viteDevChild = spawn(yarnCmd, ["dev:web"], {
+  console.info(
+    "[studio-electron-shell][vite] starting yarn dev:web (cwd=%s)",
+    repoRoot,
+  );
+  /** Default: discard yarn/vite stdout/stderr so Electron terminal stays clean. `OPENDESKTOP_ELECTRON_VITE_FORWARD_LOG=1` to inherit. */
+  const forwardViteLog =
+    process.env.OPENDESKTOP_ELECTRON_VITE_FORWARD_LOG === "1";
+  /** Windows: direct spawn of yarn.cmd fails with EINVAL; use shell (Node child_process docs). */
+  const yarnSpawnOpts = {
     cwd: repoRoot,
-    stdio: "inherit",
-    env: { ...process.env },
+    stdio: forwardViteLog ? "inherit" : "ignore",
+    env: forwardViteLog ? envForAutoViteSpawn() : { ...process.env },
     windowsHide: false,
-  });
+    ...(process.platform === "win32" ? { shell: true } : {}),
+  };
+  viteDevChild = spawn("yarn", ["dev:web"], yarnSpawnOpts);
   viteDevChild.on("exit", (code, signal) => {
     viteDevChild = null;
     if (code !== 0 && code !== null) {
-      console.error(`[studio-electron-shell][vite] 子进程退出 code=${code} signal=${signal ?? ""}`);
+      console.error(
+        `[studio-electron-shell][vite] child exited code=${code} signal=${signal ?? ""}`,
+      );
     }
   });
   viteDevChild.on("error", (err) => {
@@ -495,7 +607,7 @@ async function ensureViteDevServerRunning(loadUrl) {
   });
 }
 
-/** 等待 Vite 等第三方开发服务器可响应（GET 根路径） */
+/** Wait until Vite (or other dev server) responds on GET / */
 async function waitForStudioDevServerReady(loadUrl) {
   if (isStudioUrlServedByCore(loadUrl)) return;
   const deadline = Date.now() + READY_TIMEOUT_MS;
@@ -511,8 +623,8 @@ async function waitForStudioDevServerReady(loadUrl) {
     await new Promise((r) => setTimeout(r, READY_POLL_MS));
   }
   throw new Error(
-    `Studio 前端未在 ${READY_TIMEOUT_MS}ms 内就绪: ${loadUrl}\n` +
-      `若未使用壳自动启动，请先执行 yarn dev:web；自定义端口请设置 OPENDESKTOP_STUDIO_URL。`,
+    `Studio dev UI not ready within ${READY_TIMEOUT_MS}ms: ${loadUrl}\n` +
+      `Run yarn dev:web manually, or set OPENDESKTOP_STUDIO_URL for a custom port (see docs/studio-shell.md).`,
   );
 }
 
@@ -524,23 +636,25 @@ function spawnCoreOrThrow() {
   if (useDist) {
     if (!existsSync(coreCliJs)) {
       throw new Error(
-        `未找到 Core 构建产物：${coreCliJs}\n请先执行：yarn workspace @opendesktop/core run build`,
+        `Core build output not found: ${coreCliJs}\nRun: yarn workspace @opendesktop/core run build`,
       );
     }
     execArgv = [coreCliJs, ...startArgs];
-    console.log("[studio-electron-shell] Core 启动方式: dist/cli.js");
+    console.log("[studio-electron-shell] Core mode: dist/cli.js");
   } else {
     if (!existsSync(coreCliTs)) {
       throw new Error(
-        `未找到 Core 源码入口：${coreCliTs}\n或设置 OPENDESKTOP_ELECTRON_USE_CORE_DIST=1 使用已构建的 dist/cli.js`,
+        `Core source entry not found: ${coreCliTs}\nSet OPENDESKTOP_ELECTRON_USE_CORE_DIST=1 to use dist/cli.js`,
       );
     }
     execArgv = ["--import", "tsx", coreCliTs, ...startArgs];
-    console.log("[studio-electron-shell] Core 启动方式: tsx src/cli.ts（开发，无需先 build Core）");
+    console.log(
+      "[studio-electron-shell] Core mode: tsx packages/core/src/cli.ts (dev, no prior build)",
+    );
   }
-  // 主进程跑在 Electron 里时 process.execPath 是 Electron 而非 node；直接 spawn 会把
-  // `--import tsx …` 当成 Electron CLI，报「Unable to find Electron app at …/tsx」。
-  // ELECTRON_RUN_AS_NODE=1 时同一二进制按 Node 解释后续参数（与官方文档一致）。
+  // In Electron main, process.execPath is Electron, not node; without ELECTRON_RUN_AS_NODE, args like
+  // `--import tsx` are treated as Electron CLI ("Unable to find Electron app at …/tsx").
+  // ELECTRON_RUN_AS_NODE=1 makes the same binary run as Node (see Electron docs).
   const childEnv = {
     ...process.env,
     OPENDESKTOP_PORT: String(corePort),
@@ -556,11 +670,13 @@ function spawnCoreOrThrow() {
   coreChild.on("exit", (code, signal) => {
     coreChild = null;
     if (code !== 0 && code !== null) {
-      console.error(`Core 子进程退出 code=${code} signal=${signal ?? ""}`);
+      console.error(
+        `[studio-electron-shell] Core child exited code=${code} signal=${signal ?? ""}`,
+      );
     }
   });
   coreChild.on("error", (err) => {
-    console.error("Core 子进程 error:", err);
+    console.error("[studio-electron-shell] Core child error:", err);
   });
 }
 
@@ -606,9 +722,12 @@ async function killViteDevChild() {
 
 function logStartupDiagnostics() {
   const tokenPath = resolveCoreTokenFilePath();
-  console.info("[studio-electron-shell][diag] token 文件路径（与 Core loadConfig 一致）:", tokenPath);
   console.info(
-    "[studio-electron-shell][diag] 开发: Core 默认 tsx 源码 | 窗口默认 Vite。覆盖: USE_CORE_DIST / STUDIO_USE_CORE_UI / SKIP_VITE_SPAWN（见 docs/studio-shell.md）",
+    "[studio-electron-shell][diag] token file (same as Core loadConfig):",
+    tokenPath,
+  );
+  console.info(
+    "[studio-electron-shell][diag] Dev: Core defaults to tsx; window defaults to Vite. Overrides: OPENDESKTOP_ELECTRON_USE_CORE_DIST / OPENDESKTOP_STUDIO_USE_CORE_UI / OPENDESKTOP_ELECTRON_SKIP_VITE_SPAWN — see docs/studio-shell.md",
   );
 }
 
@@ -616,40 +735,56 @@ function registerIpc() {
   ipcMain.handle("od:set-studio-session-context", async (_event, payload) => {
     const p = payload && typeof payload === "object" ? payload : {};
     const sid =
-      typeof p.sessionId === "string" && p.sessionId.trim() ? p.sessionId.trim() : null;
+      typeof p.sessionId === "string" && p.sessionId.trim()
+        ? p.sessionId.trim()
+        : null;
     const tid =
-      typeof p.targetId === "string" && p.targetId.trim() ? p.targetId.trim() : null;
+      typeof p.targetId === "string" && p.targetId.trim()
+        ? p.targetId.trim()
+        : null;
     studioShortcutContext = { sessionId: sid, targetId: tid };
-    console.info("[studio-electron-shell][session-context] 快捷键上下文", studioShortcutContext);
+    console.info(
+      "[studio-electron-shell][session-context] shortcut context",
+      studioShortcutContext,
+    );
     return { ok: true };
   });
 
   ipcMain.handle("od:set-global-shortcuts", async (_event, bindings) => {
     const b = bindings && typeof bindings === "object" ? bindings : {};
-    console.info("[studio-electron-shell][globalShortcut] IPC od:set-global-shortcuts 收到", {
-      actionIds: Object.keys(b),
-      bindings: b,
-    });
+    console.info(
+      "[studio-electron-shell][globalShortcut] IPC od:set-global-shortcuts recv",
+      {
+        actionIds: Object.keys(b),
+        bindings: b,
+      },
+    );
     const result = applyGlobalShortcutBindings(b);
-    console.info("[studio-electron-shell][globalShortcut] IPC od:set-global-shortcuts 返回", result);
+    console.info(
+      "[studio-electron-shell][globalShortcut] IPC od:set-global-shortcuts result",
+      result,
+    );
     return result;
   });
 
   ipcMain.handle("od:read-core-bearer-token", async () => {
     const p = resolveCoreTokenFilePath();
     const exists = existsSync(p);
-    console.info("[studio-electron-shell][token] IPC od:read-core-bearer-token", {
-      path: p,
-      exists,
-      OPENDESKTOP_DATA_DIR: process.env.OPENDESKTOP_DATA_DIR ?? "(unset)",
-      OPENDESKTOP_TOKEN_FILE: process.env.OPENDESKTOP_TOKEN_FILE ?? "(unset)",
-    });
+    console.info(
+      "[studio-electron-shell][token] IPC od:read-core-bearer-token",
+      {
+        path: p,
+        exists,
+        OPENDESKTOP_DATA_DIR: process.env.OPENDESKTOP_DATA_DIR ?? "(unset)",
+        OPENDESKTOP_TOKEN_FILE: process.env.OPENDESKTOP_TOKEN_FILE ?? "(unset)",
+      },
+    );
     try {
       const raw = readFileSync(p, "utf8");
       const t = raw.trim();
       console.info("[studio-electron-shell][token] read ok", {
         length: t.length,
-        preview: t ? `${t.slice(0, 4)}…${t.slice(-2)}` : "(empty)",
+        preview: t ? `${t.slice(0, 4)}...${t.slice(-2)}` : "(empty)",
       });
       return t || null;
     } catch (e) {
@@ -666,13 +801,14 @@ function registerIpc() {
     const props =
       process.platform === "darwin"
         ? {
-            title: "选择可执行文件或应用程序",
+            title: "Choose app or executable",
             properties: ["openFile", "openDirectory"],
-            message: "可选择 .app、Unix 可执行文件或文件夹",
+            message:
+              "You can select a .app bundle, a Unix executable, or a folder.",
           }
         : process.platform === "win32"
           ? {
-              title: "选择可执行文件",
+              title: "Choose executable",
               properties: ["openFile"],
               filters: [
                 { name: "Executable", extensions: ["exe"] },
@@ -680,11 +816,14 @@ function registerIpc() {
               ],
             }
           : {
-              title: "选择可执行文件",
+              title: "Choose executable",
               properties: ["openFile"],
             };
 
-    const { canceled, filePaths } = await dialog.showOpenDialog(focused ?? undefined, props);
+    const { canceled, filePaths } = await dialog.showOpenDialog(
+      focused ?? undefined,
+      props,
+    );
     if (canceled || !filePaths?.length) return null;
     return filePaths[0];
   });
@@ -720,22 +859,27 @@ function registerIpc() {
   });
 
   /**
-   * Qt 会话 AX 捕获：主屏全屏透明层 + 主进程轮询 `screen.getCursorScreenPoint()`，
-   * 与 `GET .../native-accessibility-at-point?x=&y=` 使用同一屏幕坐标系。
+   * Qt session AX: full-screen transparent layer + main-process poll of `screen.getCursorScreenPoint()`,
+   * same coordinate space as `GET .../native-accessibility-at-point?x=&y=`.
    * @see docs/studio-shell.md
    */
   ipcMain.handle("od:qt-ax-overlay-start", async () => {
     if (process.platform !== "darwin") {
-      return { ok: false, error: "屏幕十字线覆盖层仅支持 macOS" };
+      return { ok: false, error: "Qt AX overlay is only supported on macOS" };
     }
     if (qtAxOverlayWindow && !qtAxOverlayWindow.isDestroyed()) {
       return { ok: true };
     }
     if (!studioShellMainWindow || studioShellMainWindow.isDestroyed()) {
-      return { ok: false, error: "主窗口未就绪" };
+      return { ok: false, error: "Main window not ready" };
     }
     const p0 = screen.getCursorScreenPoint();
-    const { x: bx, y: by, width, height } = screen.getDisplayNearestPoint(p0).bounds;
+    const {
+      x: bx,
+      y: by,
+      width,
+      height,
+    } = screen.getDisplayNearestPoint(p0).bounds;
     qtAxOverlayWindow = new BrowserWindow({
       x: bx,
       y: by,
@@ -763,7 +907,9 @@ function registerIpc() {
     }
     if (process.platform === "darwin") {
       try {
-        qtAxOverlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+        qtAxOverlayWindow.setVisibleOnAllWorkspaces(true, {
+          visibleOnFullScreen: true,
+        });
       } catch {
         /* ignore */
       }
@@ -780,7 +926,7 @@ function registerIpc() {
     qtAxOverlayWindow.setIgnoreMouseEvents(true, { forward: true });
     qtAxOverlayWindow.showInactive();
 
-    /** 略快于十字线，便于指针移出控件后尽快清掉旧矩形（不依赖 Core 下一轮响应）。 */
+    /** Slightly faster than crosshair cadence; clear stale rect when pointer leaves (no Core round-trip). */
     const pollMs = 50;
     qtAxCursorInterval = setInterval(() => {
       if (!studioShellMainWindow || studioShellMainWindow.isDestroyed()) {
@@ -794,13 +940,18 @@ function registerIpc() {
       const p = screen.getCursorScreenPoint();
       const nb = screen.getDisplayNearestPoint(p).bounds;
       const cur = qtAxOverlayWindow.getBounds();
-      if (cur.x !== nb.x || cur.y !== nb.y || cur.width !== nb.width || cur.height !== nb.height) {
+      if (
+        cur.x !== nb.x ||
+        cur.y !== nb.y ||
+        cur.width !== nb.width ||
+        cur.height !== nb.height
+      ) {
         qtAxOverlayWindow.setBounds(nb);
       }
       const b = qtAxOverlayWindow.getBounds();
       const lx = p.x - b.x;
       const ly = p.y - b.y;
-      /** 若指针已离开上一帧的 hit 矩形，立即丢弃缓存，避免「人走了矩形还在」的滞后感（新矩形仍等 IPC）。 */
+      /** If pointer left last hit rect, drop cache immediately (new rect still from IPC). */
       const gPrev = qtAxLastHitFrameGlobal;
       if (
         gPrev &&
@@ -832,8 +983,15 @@ function registerIpc() {
           height: g.height,
         };
       }
-      qtAxOverlayWindow.webContents.send("od-overlay-draw", { x: lx, y: ly, highlight });
-      studioShellMainWindow.webContents.send("od:qt-ax-cursor", { x: p.x, y: p.y });
+      qtAxOverlayWindow.webContents.send("od-overlay-draw", {
+        x: lx,
+        y: ly,
+        highlight,
+      });
+      studioShellMainWindow.webContents.send("od:qt-ax-cursor", {
+        x: p.x,
+        y: p.y,
+      });
     }, pollMs);
 
     return { ok: true };
@@ -866,13 +1024,17 @@ async function createWindow() {
   try {
     await ensureCoreRunning();
     const loadUrl = resolveStudioLoadUrl();
+    console.log("[studio-electron-shell][diag] loadUrl ->1", loadUrl);
     await ensureViteDevServerRunning(loadUrl);
     await waitForStudioDevServerReady(loadUrl);
-    console.info("[studio-electron-shell][diag] loadURL →", loadUrl);
+    console.info("[studio-electron-shell][diag] loadURL ->2", loadUrl);
     await win.loadURL(loadUrl);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    await dialog.showErrorBox("OpenDesktop Studio", `无法启动 Core 或加载界面：\n${msg}`);
+    await dialog.showErrorBox(
+      "OpenDesktop Studio",
+      `Failed to start Core or load UI:\n${msg}`,
+    );
     app.quit();
   }
 }
@@ -881,8 +1043,11 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  // Wayland：全局快捷键需 Chromium GlobalShortcutsPortal（Electron 文档）。
-  if (process.platform === "linux" && process.env.XDG_SESSION_TYPE === "wayland") {
+  // Wayland: global shortcuts need Chromium GlobalShortcutsPortal (Electron docs).
+  if (
+    process.platform === "linux" &&
+    process.env.XDG_SESSION_TYPE === "wayland"
+  ) {
     try {
       app.commandLine.appendSwitch("enable-features", "GlobalShortcutsPortal");
     } catch {

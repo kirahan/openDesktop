@@ -4079,7 +4079,7 @@ export function App() {
         args,
         env: {},
         uiRuntime: regUiRuntime,
-        injectElectronDebugPort: regInjectCdp,
+        injectElectronDebugPort: regUiRuntime === "qt" ? false : regInjectCdp,
         headless: regHeadless,
         useDedicatedProxy: regDedicatedProxy,
       };
@@ -6505,7 +6505,10 @@ export function App() {
                       name="od-reg-ui-runtime"
                       checked={regUiRuntime === "electron"}
                       disabled={registerAppBusy}
-                      onChange={() => setRegUiRuntime("electron")}
+                      onChange={() => {
+                        setRegUiRuntime("electron");
+                        setRegInjectCdp(true);
+                      }}
                     />
                     electron
                   </label>
@@ -6524,7 +6527,10 @@ export function App() {
                       name="od-reg-ui-runtime"
                       checked={regUiRuntime === "qt"}
                       disabled={registerAppBusy}
-                      onChange={() => setRegUiRuntime("qt")}
+                      onChange={() => {
+                        setRegUiRuntime("qt");
+                        setRegInjectCdp(false);
+                      }}
                     />
                     qt
                   </label>
@@ -6543,10 +6549,10 @@ export function App() {
                 <input
                   type="checkbox"
                   checked={regInjectCdp}
-                  disabled={registerAppBusy}
+                  disabled={registerAppBusy || regUiRuntime === "qt"}
                   onChange={(e) => setRegInjectCdp(e.target.checked)}
                 />
-                注入远程调试端口（与 CLI 默认一致，Electron 调试用）
+                注入远程调试端口（Electron 调试用；Qt 不适用）
               </label>
               <label
                 style={{

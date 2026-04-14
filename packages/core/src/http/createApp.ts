@@ -316,7 +316,8 @@ export function createApp(deps: AppDeps): CreateAppResult {
       env: body.env ?? {},
       args: body.args ?? [],
       ...(body.uiRuntime !== undefined ? { uiRuntime: ur.value } : {}),
-      injectElectronDebugPort: body.injectElectronDebugPort ?? true,
+      injectElectronDebugPort:
+        body.injectElectronDebugPort ?? (ur.value === "electron"),
       headless: body.headless === true,
       useDedicatedProxy: body.useDedicatedProxy === true,
       proxyRules: Array.isArray(body.proxyRules) ? body.proxyRules : undefined,
