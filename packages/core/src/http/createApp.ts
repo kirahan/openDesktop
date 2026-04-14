@@ -75,6 +75,7 @@ import { pickWindowsExecutablePath } from "../dialog/pickWindowsExecutablePath.j
 import { resolveWindowsShortcutFromPath } from "../shortcut/resolveWindowsShortcut.js";
 import { dumpMacAccessibilityTree } from "../nativeAccessibility/macAxTree.js";
 import { dumpMacAccessibilityAtPoint } from "../nativeAccessibility/macAxTreeAtPoint.js";
+import { dumpWin32HwndAtPoint } from "../nativeAccessibility/winHwndAtPoint.js";
 import { dumpWinAccessibilityAtPoint, dumpWinAccessibilityTree } from "../nativeAccessibility/winUiaTreeAtPoint.js";
 import { getGlobalMousePosition } from "../nativeAccessibility/getGlobalMousePosition.js";
 import {
@@ -189,7 +190,7 @@ export function createApp(deps: AppDeps): CreateAppResult {
         ? (["native_accessibility_tree", "native_accessibility_at_point"] as const)
         : []),
       ...(process.platform === "win32"
-        ? (["native_accessibility_tree", "native_accessibility_at_point"] as const)
+        ? (["native_accessibility_tree", "native_accessibility_at_point", "native_win32_hwnd_at_point"] as const)
         : []),
       ...(config.enableAgentApi ? (["agent", "snapshot"] as const) : []),
       ...(config.enableExtendedLogFields ? (["extended_logs"] as const) : []),
@@ -678,6 +679,60 @@ export function createApp(deps: AppDeps): CreateAppResult {
       ancestors: result.ancestors,
       at: result.at,
       ...(result.hitFrame ? { hitFrame: result.hitFrame } : {}),
+    });
+  });
+
+  /** Windows：屏幕坐标处 user32 WindowFromPoint，PID 校验，顶层与命中 HWND 矩形（非 UIA）。 */
+  v1.get("/sessions/:sessionId/native-win32-hwnd-at-point", async (req, res) => {
+    if (process.platform !== "win32") {
+      return jsonError(
+        res,
+        400,
+        "PLATFORM_UNSUPPORTED",
+        "native win32 hwnd at-point is only available on Windows",
+      );
+    }
+    const sessionId = req.params.sessionId;
+    const s = manager.get(sessionId);
+    if (!s) return jsonError(res, 404, "SESSION_NOT_FOUND", "Session not found");
+    if (s.state !== "running") {
+      return jsonError(res, 400, "SESSION_NOT_READY", "Session must be running");
+    }
+    if (s.pid === undefined || s.pid === null) {
+      return jsonError(res, 400, "PID_UNAVAILABLE", "Session has no child process pid yet");
+    }
+    const qx = req.query.x;
+    const qy = req.query.y;
+    let screenX: number;
+    let screenY: number;
+    if (typeof qx === "string" && qx.trim() && typeof qy === "string" && qy.trim()) {
+      screenX = Number.parseFloat(qx);
+      screenY = Number.parseFloat(qy);
+      if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) {
+        return jsonError(res, 400, "VALIDATION_ERROR", "x and y must be finite numbers");
+      }
+    } else {
+      const pos = await getGlobalMousePosition();
+      if (!pos.ok) {
+        return jsonError(res, 422, pos.code, pos.message);
+      }
+      screenX = pos.x;
+      screenY = pos.y;
+    }
+    const result = await dumpWin32HwndAtPoint(s.pid, { screenX, screenY });
+    if (!result.ok) {
+      if (result.code === "HIT_OUTSIDE_SESSION") {
+        return jsonError(res, 400, result.code, result.message);
+      }
+      const status = result.code === "PLATFORM_UNSUPPORTED" ? 400 : 422;
+      return jsonError(res, status, result.code, result.message);
+    }
+    res.json({
+      screenX: result.screenX,
+      screenY: result.screenY,
+      topLevel: result.topLevel,
+      leafAtPoint: result.leafAtPoint,
+      realChildOfRoot: result.realChildOfRoot,
     });
   });
 

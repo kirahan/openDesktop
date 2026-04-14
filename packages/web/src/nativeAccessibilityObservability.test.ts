@@ -3,6 +3,7 @@ import {
   isNativeAccessibilityTreeActionEnabled,
   nativeAccessibilityAtPointDisabledReason,
   nativeAccessibilityTreeDisabledReason,
+  nativeWin32HwndAtPointDisabledReason,
 } from "./nativeAccessibilityObservability.js";
 
 describe("nativeAccessibilityTree UI gate", () => {
@@ -51,6 +52,20 @@ describe("nativeAccessibilityAtPointDisabledReason", () => {
   it("allows when capability and running and pid", () => {
     expect(
       nativeAccessibilityAtPointDisabledReason(["native_accessibility_at_point"], { state: "running", pid: 2 }),
+    ).toBeNull();
+  });
+});
+
+describe("nativeWin32HwndAtPointDisabledReason", () => {
+  it("requires capability", () => {
+    expect(nativeWin32HwndAtPointDisabledReason([], { state: "running", pid: 1 })).toContain(
+      "native_win32_hwnd_at_point",
+    );
+  });
+
+  it("allows when capability and running and pid", () => {
+    expect(
+      nativeWin32HwndAtPointDisabledReason(["native_win32_hwnd_at_point"], { state: "running", pid: 2 }),
     ).toBeNull();
   });
 });

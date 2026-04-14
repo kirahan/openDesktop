@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildNativeAccessibilityAtPointPath, QT_AX_SHELL_CURSOR_POLL_MS } from "./nativeA11yAtPointUrl.js";
+import {
+  buildNativeAccessibilityAtPointPath,
+  buildNativeWin32HwndAtPointPath,
+  QT_AX_SHELL_CURSOR_POLL_MS,
+} from "./nativeA11yAtPointUrl.js";
 
 describe("buildNativeAccessibilityAtPointPath", () => {
   it("builds base path with default depth params", () => {
@@ -18,6 +22,21 @@ describe("buildNativeAccessibilityAtPointPath", () => {
   it("ignores non-finite coordinates", () => {
     const base = buildNativeAccessibilityAtPointPath("x", { x: NaN, y: 1 });
     expect(base).not.toContain("x=NaN");
+  });
+});
+
+describe("buildNativeWin32HwndAtPointPath", () => {
+  it("builds path without query when no coords", () => {
+    expect(buildNativeWin32HwndAtPointPath("sid-1")).toBe(
+      "/v1/sessions/sid-1/native-win32-hwnd-at-point",
+    );
+  });
+
+  it("appends explicit screen coordinates when finite", () => {
+    const p = buildNativeWin32HwndAtPointPath("a b", { x: 10, y: 20 });
+    expect(p).toContain("x=10");
+    expect(p).toContain("y=20");
+    expect(p).toContain(encodeURIComponent("a b"));
   });
 });
 

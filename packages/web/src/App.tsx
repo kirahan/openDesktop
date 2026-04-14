@@ -24,16 +24,24 @@ import { RrwebStreamDiagnostics } from "./replay/rrwebDiagnosticsPanel.js";
 import {
   nativeAccessibilityAtPointDisabledReason,
   nativeAccessibilityTreeDisabledReason,
+  nativeWin32HwndAtPointDisabledReason,
 } from "./nativeAccessibilityObservability.js";
 import { MacAxTreeVisual } from "./macAxTreeVisual.js";
 import {
   buildNativeAccessibilityAtPointPath,
+  buildNativeWin32HwndAtPointPath,
   QT_AX_SHELL_CURSOR_POLL_MS,
 } from "./nativeA11yAtPointUrl.js";
 import { ElectronGlobalShortcutPanel } from "./electronGlobalShortcutPanel.js";
 import { applyElectronShellBearerTokenPrefillIfEmpty, getElectronShell } from "./studioShell.js";
 
-type DetailKind = "list-window" | "metrics" | "snapshot" | "native-a11y" | "native-a11y-point";
+type DetailKind =
+  | "list-window"
+  | "metrics"
+  | "snapshot"
+  | "native-a11y"
+  | "native-a11y-point"
+  | "native-win32-hwnd";
 
 const OBS_PALETTE = {
   border: "#d8dee8",
@@ -47,6 +55,7 @@ const OBS_PALETTE = {
   accentSnap: "#7c3aed",
   accentNativeA11y: "#c2410c",
   accentNativeA11yPoint: "#ea580c",
+  accentNativeWin32Hwnd: "#b45309",
 };
 
 /** 「指针附近无障碍」面板打开时自动轮询 nut-js 鼠标坐标 + Core 采样间隔（毫秒）（未开启壳十字线时） */
@@ -359,8 +368,10 @@ function ObservActionCards({
   detailSnap,
   detailNativeA11y,
   detailNativeA11yPoint,
+  detailNativeWin32Hwnd,
   nativeA11yDisabledReason,
   nativeA11yPointDisabledReason,
+  nativeWin32HwndDisabledReason,
   onAction,
 }: {
   sessionId: string;
@@ -372,9 +383,11 @@ function ObservActionCards({
   detailSnap: string | null;
   detailNativeA11y: string | null;
   detailNativeA11yPoint: string | null;
+  detailNativeWin32Hwnd: string | null;
   /** 非 null 时禁用「原生无障碍树」并展示原因 */
   nativeA11yDisabledReason: string | null;
   nativeA11yPointDisabledReason: string | null;
+  nativeWin32HwndDisabledReason: string | null;
   onAction: (id: string, kind: DetailKind) => void;
 }) {
   const electronRows: {
@@ -428,6 +441,13 @@ function ObservActionCards({
       Icon: IconNativeA11y,
       accent: OBS_PALETTE.accentNativeA11yPoint,
     },
+    {
+      kind: "native-win32-hwnd",
+      title: "捕获 HWND（鼠标周围）",
+      hint: "user32 顶层与子 HWND 矩形",
+      Icon: IconNativeA11y,
+      accent: OBS_PALETTE.accentNativeWin32Hwnd,
+    },
   ];
   const rows = sessionUiRuntime === "qt" ? qtRows : electronRows;
 
@@ -439,6 +459,7 @@ function ObservActionCards({
     if (kind === "snapshot" && detailSnap) return true;
     if (kind === "native-a11y" && detailNativeA11y) return true;
     if (kind === "native-a11y-point" && detailNativeA11yPoint) return true;
+    if (kind === "native-win32-hwnd" && detailNativeWin32Hwnd) return true;
     return false;
   };
 
@@ -458,14 +479,18 @@ function ObservActionCards({
         const loading = loadingKind === kind && detailId === sessionId;
         const isNativeTree = kind === "native-a11y";
         const isNativePoint = kind === "native-a11y-point";
+        const isNativeWin32Hwnd = kind === "native-win32-hwnd";
         const nativeReason = isNativeTree
           ? nativeA11yDisabledReason
           : isNativePoint
             ? nativeA11yPointDisabledReason
-            : null;
-        const cardDisabled = (isNativeTree || isNativePoint) && nativeReason !== null;
+            : isNativeWin32Hwnd
+              ? nativeWin32HwndDisabledReason
+              : null;
+        const cardDisabled =
+          (isNativeTree || isNativePoint || isNativeWin32Hwnd) && nativeReason !== null;
         const hintText =
-          (isNativeTree || isNativePoint) && nativeReason ? nativeReason : hint;
+          (isNativeTree || isNativePoint || isNativeWin32Hwnd) && nativeReason ? nativeReason : hint;
         return (
           <button
             key={kind}
@@ -530,6 +555,7 @@ function detailPanelTitle(kind: DetailKind | null): string {
   if (kind === "snapshot") return "态势快照（OODA）";
   if (kind === "native-a11y") return "原生无障碍树";
   if (kind === "native-a11y-point") return "指针附近无障碍";
+  if (kind === "native-win32-hwnd") return "HWND 几何（鼠标周围）";
   return "结果";
 }
 
@@ -539,7 +565,50 @@ function detailPanelAccent(kind: DetailKind | null): string {
   if (kind === "snapshot") return OBS_PALETTE.accentSnap;
   if (kind === "native-a11y") return OBS_PALETTE.accentNativeA11y;
   if (kind === "native-a11y-point") return OBS_PALETTE.accentNativeA11yPoint;
+  if (kind === "native-win32-hwnd") return OBS_PALETTE.accentNativeWin32Hwnd;
   return "#64748b";
+}
+
+/**
+ * 从 Core `native-win32-hwnd-at-point` 正文取屏幕矩形供 Electron 壳高亮：
+ * 优先 leaf（指针下最细 HWND），其次 realChildOfRoot（粗框），最后 topLevel。
+ */
+function pickWin32HwndHighlightRect(raw: Record<string, unknown>): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} | null {
+  const fromNode = (node: unknown) => {
+    if (!node || typeof node !== "object") return null;
+    const rect = (node as { rect?: unknown }).rect;
+    if (!rect || typeof rect !== "object") return null;
+    const r = rect as Record<string, unknown>;
+    const x = r.x;
+    const y = r.y;
+    const w = r.width;
+    const h = r.height;
+    if (
+      typeof x !== "number" ||
+      typeof y !== "number" ||
+      typeof w !== "number" ||
+      typeof h !== "number" ||
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(w) ||
+      !Number.isFinite(h) ||
+      w <= 0 ||
+      h <= 0
+    ) {
+      return null;
+    }
+    return { x, y, width: w, height: h };
+  };
+  for (const key of ["leafAtPoint", "realChildOfRoot", "topLevel"] as const) {
+    const v = fromNode(raw[key]);
+    if (v) return v;
+  }
+  return null;
 }
 
 function formatBytes(n: number): string {
@@ -3679,6 +3748,7 @@ export function App() {
   const [detailSnap, setDetailSnap] = useState<string | null>(null);
   const [detailNativeA11y, setDetailNativeA11y] = useState<string | null>(null);
   const [detailNativeA11yPoint, setDetailNativeA11yPoint] = useState<string | null>(null);
+  const [detailNativeWin32Hwnd, setDetailNativeWin32Hwnd] = useState<string | null>(null);
   /** 来自 `GET /v1/version`（无需 Bearer），用于是否展示原生无障碍能力 */
   const [coreCapabilities, setCoreCapabilities] = useState<string[]>([]);
   const [detailLoading, setDetailLoading] = useState<DetailKind | null>(null);
@@ -3692,6 +3762,7 @@ export function App() {
       !detailMetrics &&
       !detailSnap &&
       !detailNativeA11y &&
+      !detailNativeWin32Hwnd &&
       detailLoading === null
     );
   }, [
@@ -3702,6 +3773,30 @@ export function App() {
     detailMetrics,
     detailSnap,
     detailNativeA11y,
+    detailNativeWin32Hwnd,
+  ]);
+  /** Windows HWND 几何面板：与 at-point 相同轮询策略 */
+  const nativeWin32HwndPanelOpen = useMemo(() => {
+    if (!detailId) return false;
+    if (detailLoading === "native-win32-hwnd") return true;
+    return (
+      detailNativeWin32Hwnd !== null &&
+      !detailTopo &&
+      !detailMetrics &&
+      !detailSnap &&
+      !detailNativeA11y &&
+      !detailNativeA11yPoint &&
+      detailLoading === null
+    );
+  }, [
+    detailId,
+    detailLoading,
+    detailNativeWin32Hwnd,
+    detailTopo,
+    detailMetrics,
+    detailSnap,
+    detailNativeA11y,
+    detailNativeA11yPoint,
   ]);
   const [cdpCopiedId, setCdpCopiedId] = useState<string | null>(null);
   /** 会话 ID → 注入用户脚本中 */
@@ -4661,7 +4756,9 @@ export function App() {
   }, []);
 
   async function loadDetail(sessionId: string, kind: DetailKind, options?: { silent?: boolean }) {
-    const silent = Boolean(options?.silent && kind === "native-a11y-point");
+    const silent = Boolean(
+      options?.silent && (kind === "native-a11y-point" || kind === "native-win32-hwnd"),
+    );
     if (!tokenTrimmed) {
       const msg =
         "未填写 token：请先粘贴 Bearer。缺 token 时 Core 会返回 401，而不是你看到的 404。";
@@ -4671,6 +4768,7 @@ export function App() {
         if (kind === "snapshot") setDetailSnap(msg);
         if (kind === "native-a11y") setDetailNativeA11y(msg);
         if (kind === "native-a11y-point") setDetailNativeA11yPoint(msg);
+        if (kind === "native-win32-hwnd") setDetailNativeWin32Hwnd(msg);
       }
       return;
     }
@@ -4688,13 +4786,21 @@ export function App() {
                     ? { x: qtAxCursorRef.current.x, y: qtAxCursorRef.current.y }
                     : undefined,
                 )
-              : `/v1/agent/sessions/${sessionId}/snapshot`;
+              : kind === "native-win32-hwnd"
+                ? buildNativeWin32HwndAtPointPath(
+                    sessionId,
+                    qtAxShellCaptureOnRef.current && qtAxCursorRef.current
+                      ? { x: qtAxCursorRef.current.x, y: qtAxCursorRef.current.y }
+                      : undefined,
+                  )
+                : `/v1/agent/sessions/${sessionId}/snapshot`;
     if (!silent) {
       setDetailTopo(null);
       setDetailMetrics(null);
       setDetailSnap(null);
       setDetailNativeA11y(null);
       setDetailNativeA11yPoint(null);
+      setDetailNativeWin32Hwnd(null);
       setDetailLoading(kind);
     }
     setDetailId(sessionId);
@@ -4733,6 +4839,19 @@ export function App() {
           }
         }
       }
+      if (kind === "native-win32-hwnd") {
+        setDetailNativeWin32Hwnd(pretty);
+        const sh = getElectronShell();
+        if (qtAxShellCaptureOnRef.current && sh?.setQtAxHitHighlight) {
+          const raw = json as Record<string, unknown>;
+          const hf = pickWin32HwndHighlightRect(raw);
+          if (hf) {
+            void sh.setQtAxHitHighlight(hf);
+          } else {
+            void sh.setQtAxHitHighlight(null);
+          }
+        }
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (kind === "list-window") setDetailTopo(msg);
@@ -4741,6 +4860,13 @@ export function App() {
       if (kind === "native-a11y") setDetailNativeA11y(msg);
       if (kind === "native-a11y-point") {
         setDetailNativeA11yPoint(msg);
+        const sh = getElectronShell();
+        if (qtAxShellCaptureOnRef.current && sh?.setQtAxHitHighlight) {
+          void sh.setQtAxHitHighlight(null);
+        }
+      }
+      if (kind === "native-win32-hwnd") {
+        setDetailNativeWin32Hwnd(msg);
         const sh = getElectronShell();
         if (qtAxShellCaptureOnRef.current && sh?.setQtAxHitHighlight) {
           void sh.setQtAxHitHighlight(null);
@@ -4778,14 +4904,35 @@ export function App() {
   }, [tokenTrimmed, nativeA11yPointPanelOpen, detailId, qtAxShellCaptureOn]);
 
   useEffect(() => {
+    if (!tokenTrimmed || !nativeWin32HwndPanelOpen || !detailId) return;
+    if (qtAxShellCaptureOn) return;
+    const sid = detailId;
+    const id = window.setInterval(() => {
+      if (detailIdPollRef.current !== sid) return;
+      void loadDetailRef.current(sid, "native-win32-hwnd", { silent: true });
+    }, NATIVE_A11Y_POINT_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [tokenTrimmed, nativeWin32HwndPanelOpen, detailId, qtAxShellCaptureOn]);
+
+  useEffect(() => {
+    if (!tokenTrimmed || !nativeWin32HwndPanelOpen || !detailId || !qtAxShellCaptureOn) return;
+    const sid = detailId;
+    const id = window.setInterval(() => {
+      if (detailIdPollRef.current !== sid) return;
+      void loadDetailRef.current(sid, "native-win32-hwnd", { silent: true });
+    }, QT_AX_SHELL_CURSOR_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [tokenTrimmed, nativeWin32HwndPanelOpen, detailId, qtAxShellCaptureOn]);
+
+  useEffect(() => {
     disableQtAxShellCapture();
   }, [detailId, disableQtAxShellCapture]);
 
   useEffect(() => {
-    if (!nativeA11yPointPanelOpen) {
+    if (!nativeA11yPointPanelOpen && !nativeWin32HwndPanelOpen) {
       disableQtAxShellCapture();
     }
-  }, [nativeA11yPointPanelOpen, disableQtAxShellCapture]);
+  }, [nativeA11yPointPanelOpen, nativeWin32HwndPanelOpen, disableQtAxShellCapture]);
 
   return (
     <div
@@ -5805,11 +5952,16 @@ export function App() {
                     detailSnap={detailSnap}
                     detailNativeA11y={detailNativeA11y}
                     detailNativeA11yPoint={detailNativeA11yPoint}
+                    detailNativeWin32Hwnd={detailNativeWin32Hwnd}
                     nativeA11yDisabledReason={nativeAccessibilityTreeDisabledReason(coreCapabilities, {
                       state: s.state,
                       pid: s.pid,
                     })}
                     nativeA11yPointDisabledReason={nativeAccessibilityAtPointDisabledReason(coreCapabilities, {
+                      state: s.state,
+                      pid: s.pid,
+                    })}
+                    nativeWin32HwndDisabledReason={nativeWin32HwndAtPointDisabledReason(coreCapabilities, {
                       state: s.state,
                       pid: s.pid,
                     })}
@@ -5823,7 +5975,8 @@ export function App() {
                   detailMetrics ||
                   detailSnap ||
                   detailNativeA11y ||
-                  detailNativeA11yPoint) && (
+                  detailNativeA11yPoint ||
+                  detailNativeWin32Hwnd) && (
                 <tr>
                   <td colSpan={5} style={{ borderBottom: "1px solid #e8edf4", paddingBottom: 12 }}>
                     {(() => {
@@ -5839,7 +5992,9 @@ export function App() {
                                 ? "native-a11y"
                                 : detailNativeA11yPoint
                                   ? "native-a11y-point"
-                                  : null);
+                                  : detailNativeWin32Hwnd
+                                    ? "native-win32-hwnd"
+                                    : null);
                       return (
                     <div
                       style={{
@@ -5871,7 +6026,8 @@ export function App() {
                           }}
                         />
                         {detailPanelTitle(panelKind)}
-                        {panelKind === "native-a11y-point" && !detailLoading ? (
+                        {(panelKind === "native-a11y-point" || panelKind === "native-win32-hwnd") &&
+                        !detailLoading ? (
                           <span
                             style={{
                               fontWeight: 400,
@@ -5884,10 +6040,15 @@ export function App() {
                             }}
                           >
                             {detailSession?.uiRuntime === "qt" &&
-                            nativeAccessibilityAtPointDisabledReason(coreCapabilities, {
-                              state: detailSession.state,
-                              pid: detailSession.pid,
-                            }) === null ? (
+                            (panelKind === "native-win32-hwnd"
+                              ? nativeWin32HwndAtPointDisabledReason(coreCapabilities, {
+                                  state: detailSession.state,
+                                  pid: detailSession.pid,
+                                })
+                              : nativeAccessibilityAtPointDisabledReason(coreCapabilities, {
+                                  state: detailSession.state,
+                                  pid: detailSession.pid,
+                                })) === null ? (
                               <>
                                 <button
                                   type="button"
@@ -5926,7 +6087,7 @@ export function App() {
                                 </button>
                                 <span>
                                   {qtAxShellCaptureOn
-                                    ? `显式屏幕坐标，约每 ${QT_AX_SHELL_CURSOR_POLL_MS}ms 刷新树（与覆盖层同源）`
+                                    ? `显式屏幕坐标，约每 ${QT_AX_SHELL_CURSOR_POLL_MS}ms 刷新（与覆盖层同源）`
                                     : `未开启时约每 ${NATIVE_A11Y_POINT_POLL_MS / 1000}s 用 nut-js 读全局鼠标`}
                                 </span>
                               </>
@@ -5951,7 +6112,8 @@ export function App() {
                           detailMetrics ??
                           detailSnap ??
                           detailNativeA11y ??
-                          detailNativeA11yPoint
+                          detailNativeA11yPoint ??
+                          detailNativeWin32Hwnd
                         }
                         loading={!!detailLoading}
                         topologySnapshotCtx={

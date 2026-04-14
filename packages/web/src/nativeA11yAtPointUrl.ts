@@ -23,3 +23,21 @@ export function buildNativeAccessibilityAtPointPath(
   const qs = q.toString();
   return `/v1/sessions/${encodeURIComponent(sessionId)}/native-accessibility-at-point?${qs}`;
 }
+
+/**
+ * 构建 `GET .../native-win32-hwnd-at-point`（user32 几何，非 UIA）。
+ * 若传入 `x`/`y` 则使用显式屏幕坐标；否则 Core 用 nut-js 读全局鼠标。
+ */
+export function buildNativeWin32HwndAtPointPath(
+  sessionId: string,
+  opts?: { x?: number; y?: number },
+): string {
+  const base = `/v1/sessions/${encodeURIComponent(sessionId)}/native-win32-hwnd-at-point`;
+  if (opts !== undefined && typeof opts.x === "number" && typeof opts.y === "number") {
+    if (Number.isFinite(opts.x) && Number.isFinite(opts.y)) {
+      const q = new URLSearchParams({ x: String(opts.x), y: String(opts.y) });
+      return `${base}?${q.toString()}`;
+    }
+  }
+  return base;
+}
