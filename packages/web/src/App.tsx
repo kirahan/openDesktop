@@ -1177,6 +1177,8 @@ function LiveConsoleDockLayout({
   const [tabs, setTabs] = useState<LiveConsoleTabState[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  /** 与「实时观测」同构的右侧抽屉：全局快捷键配置（Electron） */
+  const [shortcutDrawerOpen, setShortcutDrawerOpen] = useState(false);
   const abortMap = useRef<Map<string, AbortController>>(new Map());
   const tabsRef = useRef<LiveConsoleTabState[]>([]);
   tabsRef.current = tabs;
@@ -1193,13 +1195,16 @@ function LiveConsoleDockLayout({
   }, [activeId]);
 
   useEffect(() => {
-    if (!drawerOpen) return;
+    if (!drawerOpen && !shortcutDrawerOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setDrawerOpen(false);
+      if (e.key === "Escape") {
+        setDrawerOpen(false);
+        setShortcutDrawerOpen(false);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [drawerOpen]);
+  }, [drawerOpen, shortcutDrawerOpen]);
 
   const stopStream = useCallback(
     async (tabId: string): Promise<void> => {
@@ -1750,39 +1755,75 @@ function LiveConsoleDockLayout({
     active?.streamKind === "replay" ||
     active?.streamKind === "rrweb";
 
+  /** 与「实时观测」入口按钮同款的右下角 FAB 样式 */
+  const dockFabBlueStyle: React.CSSProperties = {
+    padding: "10px 14px",
+    borderRadius: 10,
+    border: "none",
+    background: "#2563eb",
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+    boxShadow: "0 4px 14px rgba(37, 99, 235, 0.35)",
+  };
+
+  const electronShortcutShell = getElectronShell()?.setGlobalShortcutBindings;
+
   return (
     <LiveConsoleDockContext.Provider value={ctxValue}>
       <div style={{ width: "100%" }}>{children}</div>
-      {!drawerOpen && (
-        <button
-          type="button"
-          aria-label={tabs.length > 0 ? `打开实时观测，已打开 ${tabs.length} 个标签` : "打开实时观测"}
-          onClick={() => setDrawerOpen(true)}
-          title={tabs.length > 0 ? `已打开 ${tabs.length} 个标签` : "页面控制台 / 主进程日志 / HTTPS / 异常栈 SSE"}
+      {!drawerOpen && !shortcutDrawerOpen && (
+        <div
           style={{
             position: "fixed",
             right: 16,
             bottom: 24,
             zIndex: 1060,
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "none",
-            background: "#2563eb",
-            color: "#fff",
-            fontSize: 13,
-            fontWeight: 600,
-            cursor: "pointer",
-            boxShadow: "0 4px 14px rgba(37, 99, 235, 0.35)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+            alignItems: "flex-end",
+            maxWidth: "min(400px, calc(100vw - 32px))",
+            pointerEvents: "auto",
           }}
         >
-          实时观测{tabs.length > 0 ? ` · ${tabs.length}` : ""}
-        </button>
+          {tokenOk && electronShortcutShell ? (
+            <button
+              type="button"
+              aria-label="打开全局快捷键抽屉"
+              onClick={() => {
+                setDrawerOpen(false);
+                setShortcutDrawerOpen(true);
+              }}
+              title="配置 Electron 全局快捷键"
+              style={dockFabBlueStyle}
+            >
+              全局快捷键
+            </button>
+          ) : null}
+          <button
+            type="button"
+            aria-label={tabs.length > 0 ? `打开实时观测，已打开 ${tabs.length} 个标签` : "打开实时观测"}
+            onClick={() => {
+              setShortcutDrawerOpen(false);
+              setDrawerOpen(true);
+            }}
+            title={tabs.length > 0 ? `已打开 ${tabs.length} 个标签` : "页面控制台 / 主进程日志 / HTTPS / 异常栈 SSE"}
+            style={dockFabBlueStyle}
+          >
+            实时观测{tabs.length > 0 ? ` · ${tabs.length}` : ""}
+          </button>
+        </div>
       )}
-      {drawerOpen && (
+      {(drawerOpen || shortcutDrawerOpen) && (
         <div
           role="presentation"
           aria-hidden
-          onClick={() => setDrawerOpen(false)}
+          onClick={() => {
+            setDrawerOpen(false);
+            setShortcutDrawerOpen(false);
+          }}
           style={{
             position: "fixed",
             inset: 0,
@@ -1854,11 +1895,6 @@ function LiveConsoleDockLayout({
             <div style={{ padding: 12, fontSize: 12, color: OBS_PALETTE.textMuted }}>填写 Bearer 后可用</div>
           ) : (
             <>
-              {getElectronShell()?.setGlobalShortcutBindings ? (
-                <div style={{ padding: "8px 12px 0", flexShrink: 0 }}>
-                  <ElectronGlobalShortcutPanel />
-                </div>
-              ) : null}
               {tabs.length === 0 ? (
             <div style={{ padding: 12, fontSize: 12, color: OBS_PALETTE.textMuted, lineHeight: 1.5 }}>
               在「窗口 / 调试目标」卡片中打开「页面控制台 / 主进程日志 / HTTPS / 异常栈 / 矢量录制 / rrweb」，或点右下角「实时观测」，可新开标签；同一窗口可开多种流（多 tab）。
@@ -2133,6 +2169,82 @@ function LiveConsoleDockLayout({
             </>
           )}
         </aside>
+      {electronShortcutShell ? (
+        <aside
+          role="dialog"
+          aria-modal="true"
+          aria-hidden={!shortcutDrawerOpen}
+          aria-label="全局快捷键"
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: "fixed",
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: "min(400px, 96vw)",
+            zIndex: 1050,
+            display: "flex",
+            flexDirection: "column",
+            maxHeight: "100vh",
+            borderRadius: "12px 0 0 12px",
+            border: `1px solid ${OBS_PALETTE.border}`,
+            borderRight: "none",
+            background: "#fff",
+            boxShadow: "-4px 0 24px rgba(15,23,42,0.12)",
+            overflow: "hidden",
+            transform: shortcutDrawerOpen ? "translateX(0)" : "translateX(100%)",
+            transition: "transform 0.22s ease-out",
+            pointerEvents: shortcutDrawerOpen ? "auto" : "none",
+          }}
+        >
+          <div
+            style={{
+              padding: "10px 12px",
+              borderBottom: `1px solid ${OBS_PALETTE.border}`,
+              background: "#f8fafc",
+              fontSize: 13,
+              fontWeight: 600,
+              color: "#0f172a",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+              flexShrink: 0,
+            }}
+          >
+            <span>全局快捷键</span>
+            <button
+              type="button"
+              onClick={() => setShortcutDrawerOpen(false)}
+              style={{
+                padding: "4px 10px",
+                fontSize: 12,
+                borderRadius: 6,
+                border: `1px solid ${OBS_PALETTE.border}`,
+                background: "#fff",
+                color: "#475569",
+                cursor: "pointer",
+              }}
+            >
+              收起
+            </button>
+          </div>
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              overflow: "auto",
+              padding: "0 12px 12px",
+            }}
+          >
+            {!tokenOk ? (
+              <div style={{ padding: 12, fontSize: 12, color: OBS_PALETTE.textMuted }}>填写 Bearer 后可用</div>
+            ) : (
+              <ElectronGlobalShortcutPanel />
+            )}
+          </div>
+        </aside>
+      ) : null}
     </LiveConsoleDockContext.Provider>
   );
 }

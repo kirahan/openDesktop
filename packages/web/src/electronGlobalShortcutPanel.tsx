@@ -140,7 +140,7 @@ export function ElectronGlobalShortcutPanel() {
   return (
     <div
       style={{
-        marginBottom: 10,
+        marginBottom: 0,
         padding: 10,
         borderRadius: 8,
         border: "1px solid #e2e8f0",
