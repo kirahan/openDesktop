@@ -1,6 +1,6 @@
 # OpenDesktop
 
-**Languages:** [简体中文](README_CN.md) · **Docs:** [CLI 手册](docs/CLI.md) · [HTTP 与观测 API](docs/API.md) · [产品能力规格](docs/PRODUCT.md)
+**Languages:** [简体中文](README_CN.md) · **Docs:** [CLI 手册](docs/CLI.md) · [HTTP 与观测 API](docs/API.md) · [Studio 双基座（Node / Electron）](docs/studio-shell.md) · [产品能力规格](docs/PRODUCT.md)
 
 本地 **Electron 调试会话控制面**：Core 提供 HTTP API、CDP 反向代理、JSON 持久化与可选 Web UI（`packages/web` 构建产物由 Core 静态托管）。
 

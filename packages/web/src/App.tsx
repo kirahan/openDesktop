@@ -26,6 +26,7 @@ import {
   nativeAccessibilityTreeDisabledReason,
 } from "./nativeAccessibilityObservability.js";
 import { MacAxTreeVisual } from "./macAxTreeVisual.js";
+import { getElectronShell } from "./studioShell.js";
 
 type DetailKind = "list-window" | "metrics" | "snapshot" | "native-a11y" | "native-a11y-point";
 
@@ -3725,6 +3726,21 @@ export function App() {
     setRegisterAppErr(null);
     setRegisterAppPathHint(null);
     try {
+      const shell = getElectronShell();
+      if (shell) {
+        const picked = await shell.pickExecutableFile();
+        if (picked == null || picked.trim() === "") {
+          return;
+        }
+        const p = picked.trim();
+        setRegExe(p);
+        setRegId(suggestedAppIdFromExecutablePath(p));
+        if (p.toLowerCase().endsWith(".lnk")) {
+          await resolveRegisterShortcutForPath(p, { manageBusy: false });
+        }
+        return;
+      }
+
       const res = await fetch(apiUrl("/v1/pick-executable-path"), {
         method: "POST",
         headers,
