@@ -29,6 +29,40 @@ describe("launchDebuggedApp", () => {
     });
     expect(out.join("")).toContain("launcher-ok");
   });
+
+  it("does not pass ELECTRON_RUN_AS_NODE to child (Electron-as-Node breaks nested Electron apps)", async () => {
+    const prev = process.env.ELECTRON_RUN_AS_NODE;
+    process.env.ELECTRON_RUN_AS_NODE = "1";
+    try {
+      const app: AppDefinition = {
+        id: "t2",
+        name: "t2",
+        executable: process.execPath,
+        cwd: process.cwd(),
+        env: {},
+        args: ["-e", 'process.stdout.write(process.env.ELECTRON_RUN_AS_NODE ?? "")'],
+        injectElectronDebugPort: false,
+      };
+      const profile: ProfileDefinition = {
+        id: "p",
+        appId: "t2",
+        name: "p",
+        env: {},
+        extraArgs: [],
+      };
+      const { child } = launchDebuggedApp(app, profile, 0);
+      const out: string[] = [];
+      child.stdout?.on("data", (b: Buffer) => out.push(b.toString()));
+      await new Promise<void>((resolve, reject) => {
+        child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
+        child.on("error", reject);
+      });
+      expect(out.join("")).toBe("");
+    } finally {
+      if (prev === undefined) delete process.env.ELECTRON_RUN_AS_NODE;
+      else process.env.ELECTRON_RUN_AS_NODE = prev;
+    }
+  });
 });
 
 describe("killExistingProcessesForExecutable", () => {

@@ -1,11 +1,13 @@
 /**
  * Electron 壳通过 preload 注入的窄 API（浏览器环境不存在）。
  *
- * @see packages/studio-electron-shell/src/preload.js
+ * @see packages/studio-electron-shell/src/preload.cjs
  */
 export type OdShellElectron = {
   kind: "electron";
   version: string;
+  /** 主进程读取 Core `token.txt`，供壳内自动填 Bearer */
+  getCoreBearerToken: () => Promise<string | null>;
   pickExecutableFile: () => Promise<string | null>;
 };
 
@@ -22,4 +24,51 @@ export function getElectronShell(): OdShellElectron | undefined {
   if (typeof window === "undefined") return undefined;
   const s = window.__OD_SHELL__;
   return s?.kind === "electron" ? s : undefined;
+}
+
+/**
+ * Electron 壳内且本地尚未保存 token 时，从主进程读取 Core 使用的 Bearer 并写入 state + `od_token`。
+ * 若用户已填写或非 Electron，则不覆盖。
+ */
+const TOKEN_PREFILL_LOG = "[openDesktop][shell][token-prefill]";
+
+export async function applyElectronShellBearerTokenPrefillIfEmpty(
+  getCurrentToken: () => string,
+  setToken: (value: string) => void,
+): Promise<void> {
+  const sh = getElectronShell();
+  if (!sh) {
+    console.info(TOKEN_PREFILL_LOG, "skip: no Electron shell (__OD_SHELL__ missing or kind≠electron)");
+    return;
+  }
+  if (!sh.getCoreBearerToken) {
+    console.info(TOKEN_PREFILL_LOG, "skip: getCoreBearerToken missing (preload 版本过旧？)");
+    return;
+  }
+  const before = getCurrentToken().trim();
+  if (before !== "") {
+    console.info(TOKEN_PREFILL_LOG, "skip: od_token 已有内容", { length: before.length });
+    return;
+  }
+  console.info(TOKEN_PREFILL_LOG, "calling getCoreBearerToken() …");
+  const raw = await sh.getCoreBearerToken();
+  if (getCurrentToken().trim() !== "") {
+    console.info(TOKEN_PREFILL_LOG, "skip: 用户在等待 IPC 期间已填写 token");
+    return;
+  }
+  const t = raw?.trim() ?? "";
+  if (!t) {
+    console.info(TOKEN_PREFILL_LOG, "abort: IPC 返回空（检查主进程日志 [studio-electron-shell][token]）");
+    return;
+  }
+  console.info(TOKEN_PREFILL_LOG, "apply: 写入 React state + localStorage.od_token", {
+    length: t.length,
+    preview: `${t.slice(0, 4)}…${t.slice(-2)}`,
+  });
+  setToken(t);
+  try {
+    localStorage.setItem("od_token", t);
+  } catch (e) {
+    console.info(TOKEN_PREFILL_LOG, "localStorage.setItem failed", e);
+  }
 }

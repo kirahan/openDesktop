@@ -26,7 +26,7 @@ import {
   nativeAccessibilityTreeDisabledReason,
 } from "./nativeAccessibilityObservability.js";
 import { MacAxTreeVisual } from "./macAxTreeVisual.js";
-import { getElectronShell } from "./studioShell.js";
+import { applyElectronShellBearerTokenPrefillIfEmpty, getElectronShell } from "./studioShell.js";
 
 type DetailKind = "list-window" | "metrics" | "snapshot" | "native-a11y" | "native-a11y-point";
 
@@ -55,6 +55,8 @@ type Session = {
   cdpPort?: number;
   /** 子进程 PID（macOS 原生无障碍树等能力依赖） */
   pid?: number;
+  /** Core 在 failed 等终态时写入，如 CDP_READY_TIMEOUT、child exited… */
+  error?: string;
   /** Core 聚合自应用定义 */
   uiRuntime?: "electron" | "qt";
   allowScriptExecution?: boolean;
@@ -603,7 +605,7 @@ function Badge({ children, tone }: { children: React.ReactNode; tone: "blue" | "
 }
 
 /** 会话状态：浅底 + 同色描边圆角标签（与拓扑 Badge 区分，更接近「状态胶囊」） */
-function SessionStateTag({ state }: { state: string }) {
+function SessionStateTag({ state, error }: { state: string; error?: string }) {
   const k = (state || "").toLowerCase();
   let border = "1px solid #3b82f6";
   let background = "#dbeafe";
@@ -627,6 +629,7 @@ function SessionStateTag({ state }: { state: string }) {
   }
   return (
     <span
+      title={k === "failed" && error ? error : undefined}
       style={{
         display: "inline-block",
         padding: "4px 10px",
@@ -3409,6 +3412,27 @@ function ObservationBody({
 
 export function App() {
   const [token, setToken] = useState(() => localStorage.getItem("od_token") ?? "");
+  useEffect(() => {
+    let cancelled = false;
+    void applyElectronShellBearerTokenPrefillIfEmpty(
+      () => localStorage.getItem("od_token") ?? "",
+      (t) => {
+        if (!cancelled) setToken(t);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  /** 注册应用「选路径」：Electron 壳用「选择应用」文案；浏览器基座仍为 Core 触发的系统对话框说明 */
+  const isElectronShellForRegister = useMemo(() => getElectronShell() != null, []);
+  const registerExePickButtonLabel = isElectronShellForRegister ? "选择应用…" : "系统对话框…";
+  const registerExeInputPlaceholder = isElectronShellForRegister
+    ? "可粘贴完整路径，或点「选择应用…」选取（.lnk 会自动解析）"
+    : "可粘贴完整路径，或点「系统对话框…」选择（.lnk 会自动解析）";
+  const registerExePickButtonTitle = isElectronShellForRegister
+    ? "在本机选择应用或可执行文件（Electron 壳内原生对话框，不经由 Core HTTP）"
+    : "由本机 Core 弹出系统文件对话框以获取完整路径（Windows：PowerShell；macOS：osascript；请求会阻塞至选完或取消）。Windows 选 .lnk 后会自动解析；macOS 选 .app 时会解析为 Contents/MacOS 下主可执行文件";
   const [base, setBase] = useState(() => localStorage.getItem("od_base") ?? "");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [apps, setApps] = useState<OdApp[]>([]);
@@ -5253,7 +5277,22 @@ export function App() {
                     verticalAlign: "middle",
                   }}
                 >
-                  <SessionStateTag state={s.state} />
+                  <SessionStateTag state={s.state} error={s.error} />
+                  {(s.state || "").toLowerCase() === "failed" && s.error ? (
+                    <div
+                      style={{
+                        marginTop: 8,
+                        fontSize: 11,
+                        lineHeight: 1.45,
+                        color: "#991b1b",
+                        wordBreak: "break-word",
+                        fontFamily: "ui-monospace, monospace",
+                      }}
+                      title={s.error}
+                    >
+                      {s.error.length > 280 ? `${s.error.slice(0, 280)}…` : s.error}
+                    </div>
+                  ) : null}
                 </td>
                 <td
                   style={{
@@ -5820,12 +5859,6 @@ export function App() {
                 <div id="od-register-app-title" style={{ fontWeight: 700, fontSize: 15, color: "#0f172a" }}>
                   注册应用
                 </div>
-                <div style={{ fontSize: 11, color: OBS_PALETTE.textMuted, marginTop: 4, lineHeight: 1.45 }}>
-                  成功后将依次 <code style={{ fontSize: 10 }}>POST /v1/apps</code> 与{" "}
-                  <code style={{ fontSize: 10 }}>POST /v1/profiles</code>（默认启动配置 id 为{" "}
-                  <code style={{ fontSize: 10 }}>&lt;应用ID&gt;-default</code>，与 <code style={{ fontSize: 10 }}>yarn oc app create</code>{" "}
-                  一致）。调用名即「应用 ID」，与 <code style={{ fontSize: 10 }}>yarn oc &lt;appId&gt; …</code> 一致且全局唯一。
-                </div>
               </div>
               <button
                 type="button"
@@ -5882,7 +5915,7 @@ export function App() {
                         cur.trim() === "" ? suggestedAppIdFromExecutablePath(t) : cur,
                       );
                     }}
-                    placeholder="可粘贴完整路径，或点「系统对话框…」选择（.lnk 会自动解析）"
+                    placeholder={registerExeInputPlaceholder}
                     autoComplete="off"
                     style={{
                       flex: "1 1 200px",
@@ -5894,7 +5927,7 @@ export function App() {
                   <button
                     type="button"
                     disabled={registerAppBusy || !tokenTrimmed}
-                    title="由本机 Core 弹出系统文件对话框以获取完整路径（Windows：PowerShell；macOS：osascript；请求会阻塞至选完或取消）。Windows 选 .lnk 后会自动解析；macOS 选 .app 时会解析为 Contents/MacOS 下主可执行文件"
+                    title={registerExePickButtonTitle}
                     onClick={() => void pickExecutableViaSystemDialog()}
                     style={{
                       flexShrink: 0,
@@ -5910,7 +5943,7 @@ export function App() {
                       whiteSpace: "nowrap",
                     }}
                   >
-                    系统对话框…
+                    {registerExePickButtonLabel}
                   </button>
                 </div>
                 {registerAppPathHint && (
@@ -6013,19 +6046,53 @@ export function App() {
                   }}
                 />
               </label>
-              <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <span style={{ fontSize: 12, color: "#334155" }}>UI 运行时（影响会话观测入口）</span>
-                <select
-                  className="od-input"
-                  disabled={registerAppBusy}
-                  value={regUiRuntime}
-                  onChange={(e) => setRegUiRuntime(e.target.value === "qt" ? "qt" : "electron")}
-                  style={{ maxWidth: 280, fontSize: 13 }}
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <span style={{ fontSize: 12, color: "#334155" }}>UI 运行时</span>
+                <div
+                  role="radiogroup"
+                  aria-label="UI 运行时"
+                  style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center" }}
                 >
-                  <option value="electron">Electron / Chromium（CDP 观测）</option>
-                  <option value="qt">Qt / 原生（以无障碍树观测为主）</option>
-                </select>
-              </label>
+                  <label
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: 13,
+                      color: "#334155",
+                      cursor: registerAppBusy ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="od-reg-ui-runtime"
+                      checked={regUiRuntime === "electron"}
+                      disabled={registerAppBusy}
+                      onChange={() => setRegUiRuntime("electron")}
+                    />
+                    electron
+                  </label>
+                  <label
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: 13,
+                      color: "#334155",
+                      cursor: registerAppBusy ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="od-reg-ui-runtime"
+                      checked={regUiRuntime === "qt"}
+                      disabled={registerAppBusy}
+                      onChange={() => setRegUiRuntime("qt")}
+                    />
+                    qt
+                  </label>
+                </div>
+              </div>
               <label
                 style={{
                   display: "flex",

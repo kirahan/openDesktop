@@ -29,6 +29,15 @@ export interface LaunchProxyEnv {
   noProxy: string;
 }
 
+/**
+ * 父进程为「Electron 壳 spawn 的 Core」时，`process.env` 可能含 `ELECTRON_RUN_AS_NODE=1`（见 studio-electron-shell）。
+ * 若原样传给被测 **Electron 应用**可执行文件，会按 Node 解释导致秒退（如 code=9）；终端手动启动无此变量故正常。
+ */
+function envWithoutElectronRunAsNode(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const { ELECTRON_RUN_AS_NODE: _era, ...rest } = base;
+  return rest;
+}
+
 function mergeEnv(
   base: NodeJS.ProcessEnv,
   appEnv: Record<string, string>,
@@ -37,7 +46,7 @@ function mergeEnv(
   proxy?: LaunchProxyEnv,
 ): NodeJS.ProcessEnv {
   const merged: NodeJS.ProcessEnv = {
-    ...base,
+    ...envWithoutElectronRunAsNode(base),
     ...appEnv,
     ...profileEnv,
     CDP_PORT: String(cdpPort),
