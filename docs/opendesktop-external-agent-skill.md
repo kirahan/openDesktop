@@ -9,9 +9,9 @@
 ## Complement: Vector replay NDJSON and Agent `click`
 
 - **Vector replay**（先 `replay/recording/start`，再订阅 `GET .../replay/stream`）按行推送 **NDJSON**（如 `pointermove`、`click`、`segment_start` / `segment_end`、`assertion_checkpoint` 等），详见 `docs/API.md`。
-- **与 Agent 配合复现路径**：落盘或手工整理的制品里，每个 **`click`** 步骤常带 **`capture.vectorTarget.selector`**（与页面 `document.querySelector` 一致）。对同一 **`targetId`**（由 `GET .../list-window` 选定）依次 **`POST .../agent/sessions/:id/actions`**，body 为 `{ "action": "click", "targetId", "selector" }`，即可重放录制中的点击链。录制里若含 **`structureAnchor`** 等长文本，仅作理解上下文，**不要**当作 selector。
-- **脆弱性**：长链 **`nth-of-type`** 在 UI 结构变化后易失效；失败时用 App-first **`explore`**、或 Playwright 经 CDP 网关的 **`ariaSnapshot()`**（见下文 Optional 节）更新 selector。
-- **多文件落盘**：控制台按 **`segment_start` / `segment_end`** 拆多次 `test-recording-artifacts` 为 **Web 侧策略**，非 Core 单次 API 的必选语义；见 `packages/web/README.md`。
+- **与 Agent 配合复现路径**：落盘或手工整理的制品里，每个 `**click`** 步骤常带 `**capture.vectorTarget.selector**`（与页面 `document.querySelector` 一致）。对同一 `**targetId**`（由 `GET .../list-window` 选定）依次 `**POST .../agent/sessions/:id/actions**`，body 为 `{ "action": "click", "targetId", "selector" }`，即可重放录制中的点击链。录制里若含 `**structureAnchor**` 等长文本，仅作理解上下文，**不要**当作 selector。
+- **脆弱性**：长链 `**nth-of-type`** 在 UI 结构变化后易失效；失败时用 App-first `**explore**`、或 Playwright 经 CDP 网关的 `**ariaSnapshot()**`（见下文 Optional 节）更新 selector。
+- **多文件落盘**：控制台按 `**segment_start` / `segment_end`** 拆多次 `test-recording-artifacts` 为 **Web 侧策略**，非 Core 单次 API 的必选语义；见 `packages/web/README.md`。
 
 ---
 

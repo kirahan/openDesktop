@@ -2,7 +2,7 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import httpProxy from "http-proxy";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import type { CoreConfig } from "../config.js";
 import { API_VERSION, PACKAGE_VERSION } from "../constants.js";
 import type { SessionManager } from "../session/manager.js";
@@ -59,7 +59,10 @@ import {
 import { parseUserScriptSource } from "../userScripts/parseUserScriptMetadata.js";
 import { collectScriptBodiesForApp } from "../userScripts/collectScriptBodiesForApp.js";
 import type { UserScriptRecord } from "../userScripts/types.js";
-import { pickDarwinExecutablePath } from "../dialog/pickDarwinExecutablePath.js";
+import {
+  pickDarwinExecutablePath,
+  resolveDarwinAppBundleToExecutable,
+} from "../dialog/pickDarwinExecutablePath.js";
 import { pickWindowsExecutablePath } from "../dialog/pickWindowsExecutablePath.js";
 import { resolveWindowsShortcutFromPath } from "../shortcut/resolveWindowsShortcut.js";
 import { dumpMacAccessibilityTree } from "../nativeAccessibility/macAxTree.js";
@@ -236,6 +239,51 @@ export function createApp(deps: AppDeps): CreateAppResult {
     return jsonError(res, 500, "UNEXPECTED", "unexpected pick result");
   });
 
+  /**
+   * 将「浏览」得到的原始路径规范为可 `spawn` 的可执行文件路径（与系统选路对话框经 Core 处理后的语义一致）。
+   * - macOS：`*.app` → `Contents/MacOS/<CFBundleExecutable>`
+   * - Windows：`*.lnk` → 快捷方式目标（与 `POST /v1/resolve-windows-shortcut` 一致）
+   * - 其它：须为已存在的普通文件，返回 `path.resolve` 后的绝对路径
+   */
+  v1.post("/resolve-executable-path", async (req, res) => {
+    const body = req.body as { path?: string };
+    if (typeof body.path !== "string" || !body.path.trim()) {
+      return jsonError(res, 400, "VALIDATION_ERROR", "path required");
+    }
+    const raw = body.path.trim();
+    if (process.platform === "darwin" && raw.toLowerCase().endsWith(".app")) {
+      const resolved = await resolveDarwinAppBundleToExecutable(raw);
+      if (!resolved) {
+        return jsonError(
+          res,
+          422,
+          "APP_BUNDLE_RESOLVE_FAILED",
+          "已选择 .app，但无法从 Info.plist 解析主可执行文件。请改为选择 Contents/MacOS 下的可执行文件。",
+        );
+      }
+      return res.json({ executable: resolved });
+    }
+    if (process.platform === "win32" && raw.toLowerCase().endsWith(".lnk")) {
+      const result = await resolveWindowsShortcutFromPath(raw);
+      if ("error" in result) {
+        const status =
+          result.error === "NOT_FOUND"
+            ? 404
+            : result.error === "PLATFORM_UNSUPPORTED" ||
+                result.error === "NOT_LNK" ||
+                result.error === "PATH_NOT_ABSOLUTE"
+              ? 400
+              : 422;
+        return jsonError(res, status, result.error, result.message);
+      }
+      return res.json({ executable: result.targetPath });
+    }
+    if (!existsSync(raw) || !statSync(raw).isFile()) {
+      return jsonError(res, 400, "NOT_A_FILE", "所选路径不是存在的普通文件");
+    }
+    return res.json({ executable: path.resolve(raw) });
+  });
+
   v1.get("/apps", async (_req, res) => {
     const data = await store.readApps();
     res.json({ apps: data.apps });
@@ -261,6 +309,7 @@ export function createApp(deps: AppDeps): CreateAppResult {
       args: body.args ?? [],
       ...(body.uiRuntime !== undefined ? { uiRuntime: ur.value } : {}),
       injectElectronDebugPort: body.injectElectronDebugPort ?? true,
+      headless: body.headless === true,
       useDedicatedProxy: body.useDedicatedProxy === true,
       proxyRules: Array.isArray(body.proxyRules) ? body.proxyRules : undefined,
     };
@@ -291,6 +340,7 @@ export function createApp(deps: AppDeps): CreateAppResult {
       ...(body.args !== undefined ? { args: body.args } : {}),
       ...(patchUi ?? {}),
       ...(typeof body.injectElectronDebugPort === "boolean" ? { injectElectronDebugPort: body.injectElectronDebugPort } : {}),
+      ...(typeof body.headless === "boolean" ? { headless: body.headless } : {}),
       ...(typeof body.useDedicatedProxy === "boolean" ? { useDedicatedProxy: body.useDedicatedProxy } : {}),
       ...(body.proxyRules !== undefined ? { proxyRules: body.proxyRules } : {}),
     };

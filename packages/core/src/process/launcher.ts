@@ -113,16 +113,21 @@ async function killWindowsByExecutablePath(executable: string): Promise<void> {
   });
 }
 
-function buildArgv(
+/** @internal 导出供单测断言 argv 顺序 */
+export function buildArgv(
   app: AppDefinition,
   profile: ProfileDefinition,
   cdpPort: number,
 ): string[] {
   const base = [...app.args, ...profile.extraArgs];
-  if (app.injectElectronDebugPort) {
-    return [...base, `--remote-debugging-port=${cdpPort}`];
+  const out = [...base];
+  if (app.headless === true) {
+    out.push("--headless=new");
   }
-  return base;
+  if (app.injectElectronDebugPort) {
+    out.push(`--remote-debugging-port=${cdpPort}`);
+  }
+  return out;
 }
 
 export function launchDebuggedApp(

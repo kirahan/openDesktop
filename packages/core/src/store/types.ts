@@ -24,6 +24,11 @@ export interface AppDefinition {
   /** When true, append --remote-debugging-port <cdpPort> (Electron-style) */
   injectElectronDebugPort: boolean;
   /**
+   * 为 true 时追加 Chromium 系 `--headless=new`（无窗口）；依赖应用基于 Chromium/Electron 且支持该开关。
+   * 与 `injectElectronDebugPort` 独立，但无 CDP 时会话仍无法在 OpenDesktop 内完成观测就绪。
+   */
+  headless?: boolean;
+  /**
    * 为 true 时：本会话启动子进程仅注入进程级 HTTP(S)_PROXY 指向 Core 拉起的本地转发代理（非系统全局代理）。
    * @see packages/core/src/proxy/forwardProxyServer.ts
    */

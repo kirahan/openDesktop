@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { killExistingProcessesForExecutable, launchDebuggedApp } from "./launcher.js";
+import {
+  buildArgv,
+  killExistingProcessesForExecutable,
+  launchDebuggedApp,
+} from "./launcher.js";
 import type { AppDefinition, ProfileDefinition } from "../store/types.js";
 
 describe("launchDebuggedApp", () => {
@@ -62,6 +66,27 @@ describe("launchDebuggedApp", () => {
       if (prev === undefined) delete process.env.ELECTRON_RUN_AS_NODE;
       else process.env.ELECTRON_RUN_AS_NODE = prev;
     }
+  });
+
+  it("buildArgv adds --headless=new before --remote-debugging-port when headless", () => {
+    const app: AppDefinition = {
+      id: "h",
+      name: "h",
+      executable: "/noop",
+      cwd: "/",
+      env: {},
+      args: [],
+      injectElectronDebugPort: true,
+      headless: true,
+    };
+    const profile: ProfileDefinition = {
+      id: "p",
+      appId: "h",
+      name: "p",
+      env: {},
+      extraArgs: [],
+    };
+    expect(buildArgv(app, profile, 9222)).toEqual(["--headless=new", "--remote-debugging-port=9222"]);
   });
 });
 

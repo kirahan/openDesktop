@@ -72,6 +72,8 @@ type OdApp = {
   args: string[];
   uiRuntime?: "electron" | "qt";
   injectElectronDebugPort: boolean;
+  /** 启动时追加 `--headless=new`（Chromium/Electron） */
+  headless?: boolean;
   /** 与会话启动时注入进程级 HTTP(S)_PROXY 对应（GET /v1/sessions/.../proxy/stream） */
   useDedicatedProxy?: boolean;
 };
@@ -3453,6 +3455,8 @@ export function App() {
   const [regCwd, setRegCwd] = useState("");
   const [regArgsJson, setRegArgsJson] = useState("[]");
   const [regInjectCdp, setRegInjectCdp] = useState(true);
+  /** 无头启动（Core 追加 --headless=new） */
+  const [regHeadless, setRegHeadless] = useState(false);
   const [regDedicatedProxy, setRegDedicatedProxy] = useState(false);
   const [regUiRuntime, setRegUiRuntime] = useState<"electron" | "qt">("electron");
   /** 已注册应用 — 用户脚本弹层 */
@@ -3669,6 +3673,7 @@ export function App() {
     setRegCwd("");
     setRegArgsJson("[]");
     setRegInjectCdp(true);
+    setRegHeadless(false);
     setRegDedicatedProxy(false);
     setRegUiRuntime("electron");
     setRegisterAppOpen(true);
@@ -3756,11 +3761,29 @@ export function App() {
         if (picked == null || picked.trim() === "") {
           return;
         }
-        const p = picked.trim();
+        const originalPicked = picked.trim();
+        const normRes = await fetch(apiUrl("/v1/resolve-executable-path"), {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ path: originalPicked }),
+        });
+        const normRaw = await normRes.text();
+        let normParsed: { executable?: string; error?: { message?: string; code?: string } };
+        try {
+          normParsed = JSON.parse(normRaw) as typeof normParsed;
+        } catch {
+          throw new Error(normRaw.slice(0, 200));
+        }
+        if (!normRes.ok) {
+          const msg = normParsed.error?.message ?? `HTTP ${normRes.status}`;
+          throw new Error(msg);
+        }
+        const p = normParsed.executable?.trim();
+        if (!p) throw new Error("响应缺少 executable");
         setRegExe(p);
         setRegId(suggestedAppIdFromExecutablePath(p));
-        if (p.toLowerCase().endsWith(".lnk")) {
-          await resolveRegisterShortcutForPath(p, { manageBusy: false });
+        if (originalPicked.toLowerCase().endsWith(".lnk")) {
+          await resolveRegisterShortcutForPath(originalPicked, { manageBusy: false });
         }
         return;
       }
@@ -3851,6 +3874,7 @@ export function App() {
         env: {},
         uiRuntime: regUiRuntime,
         injectElectronDebugPort: regInjectCdp,
+        headless: regHeadless,
         useDedicatedProxy: regDedicatedProxy,
       };
       if (regCwd.trim()) body.cwd = regCwd.trim();
@@ -3913,15 +3937,20 @@ export function App() {
     }
   }
 
-  async function patchAppUseDedicatedProxy(appId: string, useDedicatedProxy: boolean) {
+  /** 应用启动相关开关（CDP / 无头 / 专用代理），与注册表单一致 */
+  async function patchAppSetting(
+    appId: string,
+    patch: Partial<Pick<OdApp, "injectElectronDebugPort" | "headless" | "useDedicatedProxy">>,
+  ) {
     if (!tokenTrimmed) return;
+    if (Object.keys(patch).length === 0) return;
     setAppBusyId(appId);
     setAppActionMsg((m) => ({ ...m, [appId]: "" }));
     try {
       const res = await fetch(apiUrl(`/v1/apps/${encodeURIComponent(appId)}`), {
         method: "PATCH",
         headers,
-        body: JSON.stringify({ useDedicatedProxy }),
+        body: JSON.stringify(patch),
       });
       const raw = await res.text();
       if (!res.ok) {
@@ -4691,7 +4720,7 @@ export function App() {
                 <table
                   style={{
                     width: "100%",
-                    minWidth: 720,
+                    minWidth: 680,
                     borderCollapse: "collapse",
                     background: "#fff",
                     tableLayout: "fixed",
@@ -4701,15 +4730,14 @@ export function App() {
                     <col style={{ width: "11%" }} />
                     <col style={{ width: "9%" }} />
                     <col style={{ width: "64px" }} />
-                    <col style={{ width: "26%" }} />
-                    <col style={{ width: "72px" }} />
-                    <col style={{ width: "88px" }} />
+                    <col style={{ width: "24%" }} />
+                    <col style={{ width: "18%" }} />
                     <col style={{ width: "14%" }} />
                     <col style={{ width: "auto", minWidth: 200 }} />
                   </colgroup>
                   <thead>
                     <tr>
-                      {["ID", "名称", "UI", "可执行与工作目录", "CDP 注入", "专用代理", "启动参数", "操作"].map((h) => (
+                      {["ID", "名称", "UI", "可执行与工作目录", "启动配置", "启动参数", "操作"].map((h) => (
                         <th
                           key={h}
                           style={{
@@ -4731,7 +4759,7 @@ export function App() {
                     {apps.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={8}
+                          colSpan={7}
                           style={{
                             padding: 20,
                             fontSize: 13,
@@ -4915,31 +4943,78 @@ export function App() {
                             </td>
                             <td
                               style={{
-                                padding: "12px 14px",
+                                padding: "10px 12px",
                                 borderBottom: `1px solid #f1f5f9`,
-                                verticalAlign: "middle",
+                                verticalAlign: "top",
                               }}
                             >
-                              <Badge tone={a.injectElectronDebugPort ? "green" : "slate"}>
-                                {a.injectElectronDebugPort ? "是" : "否"}
-                              </Badge>
-                            </td>
-                            <td
-                              style={{
-                                padding: "12px 14px",
-                                borderBottom: `1px solid #f1f5f9`,
-                                verticalAlign: "middle",
-                              }}
-                            >
-                              <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: busy ? "not-allowed" : "pointer" }}>
-                                <input
-                                  type="checkbox"
-                                  checked={a.useDedicatedProxy === true}
-                                  disabled={busy}
-                                  onChange={(e) => void patchAppUseDedicatedProxy(a.id, e.target.checked)}
-                                />
-                                <span style={{ fontSize: 11, color: "#475569" }}>启动注入</span>
-                              </label>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  gap: 8,
+                                  alignItems: "flex-start",
+                                }}
+                              >
+                                <label
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    cursor: busy ? "not-allowed" : "pointer",
+                                  }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={a.injectElectronDebugPort}
+                                    disabled={busy}
+                                    onChange={(e) =>
+                                      void patchAppSetting(a.id, {
+                                        injectElectronDebugPort: e.target.checked,
+                                      })
+                                    }
+                                  />
+                                  <span style={{ fontSize: 11, color: "#475569" }}>CDP 注入</span>
+                                </label>
+                                <label
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    cursor: busy ? "not-allowed" : "pointer",
+                                  }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={a.headless === true}
+                                    disabled={busy}
+                                    onChange={(e) =>
+                                      void patchAppSetting(a.id, { headless: e.target.checked })
+                                    }
+                                  />
+                                  <span style={{ fontSize: 11, color: "#475569" }}>无头模式</span>
+                                </label>
+                                <label
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    cursor: busy ? "not-allowed" : "pointer",
+                                  }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={a.useDedicatedProxy === true}
+                                    disabled={busy}
+                                    onChange={(e) =>
+                                      void patchAppSetting(a.id, {
+                                        useDedicatedProxy: e.target.checked,
+                                      })
+                                    }
+                                  />
+                                  <span style={{ fontSize: 11, color: "#475569" }}>专用代理</span>
+                                </label>
+                              </div>
                             </td>
                             <td
                               title={argsStr}
@@ -6110,6 +6185,24 @@ export function App() {
                   onChange={(e) => setRegInjectCdp(e.target.checked)}
                 />
                 注入远程调试端口（与 CLI 默认一致，Electron 调试用）
+              </label>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 12,
+                  color: "#475569",
+                  cursor: registerAppBusy ? "not-allowed" : "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={regHeadless}
+                  disabled={registerAppBusy}
+                  onChange={(e) => setRegHeadless(e.target.checked)}
+                />
+                无头模式（追加 <code style={{ fontSize: 10 }}>--headless=new</code>，无窗口；Chromium/Electron 系，默认关）
               </label>
               <label
                 style={{

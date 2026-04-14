@@ -50,7 +50,11 @@ function pickFallbackExecutableInMacOSFolder(base: string): string | null {
   return files[0];
 }
 
-async function resolveAppBundleToExecutable(appBundlePath: string): Promise<string | null> {
+/**
+ * 将用户或文件选择器给出的 `.app` 包路径解析为 `Contents/MacOS/<CFBundleExecutable>`（若存在）。
+ * 与 {@link pickDarwinExecutablePath} 内逻辑一致，供 HTTP `/v1/resolve-executable-path` 与 Electron 原生选路结果对齐。
+ */
+export async function resolveDarwinAppBundleToExecutable(appBundlePath: string): Promise<string | null> {
   const base = appBundlePath.trim().replace(/\/+$/, "");
   if (!base.toLowerCase().endsWith(".app")) return null;
   const infoPlist = path.join(base, "Contents", "Info.plist");
@@ -135,7 +139,7 @@ export function pickDarwinExecutablePath(): Promise<PickWindowsExecutablePathRes
         picked = picked.replace(/\/+$/, "");
 
         if (picked.toLowerCase().endsWith(".app")) {
-          const resolved = await resolveAppBundleToExecutable(picked);
+          const resolved = await resolveDarwinAppBundleToExecutable(picked);
           if (resolved) {
             resolve({ path: resolved });
             return;
