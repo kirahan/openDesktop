@@ -207,4 +207,32 @@ describe("GET /v1/sessions/:sessionId/native-accessibility-tree", () => {
     expect(dumpWinTreeMock).not.toHaveBeenCalled();
     spy.mockRestore();
   });
+
+  it("returns 422 NO_UI_ROOT on win32 when PowerShell 报告无顶层 UIA", async () => {
+    setPlatform("win32");
+    dir = await mkdtemp(path.join(tmpdir(), "od-ax-http-noroot-"));
+    const store = new JsonFileStore(dir);
+    const manager = new SessionManager(store, dir);
+    const config = loadConfig({ dataDir: dir });
+    const { app } = createApp({ config, token: "t", store, manager });
+    dumpWinTreeMock.mockResolvedValue({
+      ok: false,
+      code: "NO_UI_ROOT",
+      message: "No top-level UIA elements for this process id",
+    });
+    const spy = vi.spyOn(manager, "get").mockReturnValue({
+      id: "sid",
+      profileId: "p",
+      state: "running",
+      createdAt: new Date().toISOString(),
+      pid: 4242,
+    });
+    const res = await request(app)
+      .get("/v1/sessions/sid/native-accessibility-tree")
+      .set("Authorization", "Bearer t");
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe("NO_UI_ROOT");
+    expect(dumpWinTreeMock).toHaveBeenCalledWith(4242, { maxDepth: 12, maxNodes: 5000 });
+    spy.mockRestore();
+  });
 });

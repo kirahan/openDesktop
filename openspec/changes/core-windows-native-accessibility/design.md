@@ -2,7 +2,7 @@
 
 - **现状**：macOS 使用 Swift / AX 与 nut-js；Windows 侧采用 **无额外原生编译** 的 **PowerShell + UIA** 脚本，由 Node **spawn** 执行，环境变量传入 **PID、坐标、深度/节点上限** 等。
 - **约束**：与 **`MacAxAtPointResult` / 整树 JSON** 形态对齐，便于 Studio 单一解析路径；**PID 校验**防止命中其它进程窗口。
-- **规格缺口**：`openspec/specs/native-accessibility-at-point/spec.md` 仍偏 mac 叙述，需通过 **delta** 收敛后再 **reconcile** 入主规格。
+- **规格**：主规格 `openspec/specs/native-accessibility-at-point/spec.md` 已与 **darwin + win32** 对齐（apply 时合并 delta）。
 
 ## Goals / Non-Goals
 
